@@ -1,4 +1,4 @@
-"""Event-driven support. No autonomous refunds or claim closures in this release.
+"""Event-driven support with opt-in claim resolution and durable compensation ledger.
 
 Webhook data is a hint, never authority. All sends use the existing durable ledger.
 Run one process on one persistent disk (an OS lock enforces the worker singleton).
@@ -20,6 +20,7 @@ from urllib.parse import urlencode
 import httpx
 from cryptography.fernet import Fernet
 from starlette.responses import JSONResponse, HTMLResponse
+from support_claims import Claims
 
 API = 'https://api.mercadolibre.com'
 SCHEMA = {'type': 'object', 'properties': {
@@ -84,6 +85,16 @@ class AutoSupport:
               state TEXT, reason TEXT, created REAL, UNIQUE(topic,resource));
             CREATE TABLE IF NOT EXISTS usage(day TEXT PRIMARY KEY, calls INTEGER NOT NULL);
             ''')
+            # v0.6 deduplicated claims forever. Preserve jobs while allowing successive events.
+            if 'event_key' not in [r[1] for r in c.execute('PRAGMA table_info(jobs)')]:
+                c.executescript('''BEGIN IMMEDIATE;
+                ALTER TABLE jobs RENAME TO jobs_v06;
+                CREATE TABLE jobs(id INTEGER PRIMARY KEY, topic TEXT, resource TEXT,
+                    state TEXT, reason TEXT, created REAL, event_key TEXT, UNIQUE(topic,event_key));
+                INSERT INTO jobs SELECT id,topic,resource,state,reason,created,resource FROM jobs_v06;
+                DROP TABLE jobs_v06;
+                COMMIT;''')
+        self.claims = Claims(self)
 
     def db(self):
         return sqlite3.connect(self.path, timeout=10)
@@ -101,12 +112,14 @@ class AutoSupport:
         with self.db() as c:
             counts = dict(c.execute('SELECT state,count(*) FROM jobs GROUP BY state'))
         token = self.get('token')
-        return {'version': 'support-auto-v0.6', 'worker_running': self.running,
+        return {'version': 'support-auto-v0.7', 'worker_running': self.running,
                 'automatic_replies_enabled': self.enabled(),
                 'configured_for_auto': self.configured(), 'background_authorized': bool(token),
                 'paused': self.get('paused', True), 'queue': counts,
-                'claims_money_actions_enabled': False,
-                'claims_policy': 'ARS < 40000; financial adapter not implemented; human review',
+                'claims_money_actions_enabled': self.claims.enabled() and bool(self.get('claims_cutover')),
+                'claims_policy': 'ARS < 40000 per single-order purchase; refund or return when eligible; complex cases reviewed',
+                'claims_sweep_error': self.get('claims_sweep_error'),
+                'last_claims_sweep_at': self.get('last_claims_sweep_at'),
                 'last_event_at': self.get('last_event_at'), 'last_worker_at': self.get('heartbeat')}
 
     def configured(self):
@@ -211,8 +224,10 @@ class AutoSupport:
                 c.execute('BEGIN IMMEDIATE')
                 if c.execute("SELECT count(*) FROM jobs WHERE created>?", (time.time()-3600,)).fetchone()[0] >= 300:
                     return JSONResponse({'error': 'rate_limit'}, status_code=429)
-                c.execute("INSERT OR IGNORE INTO jobs(topic,resource,state,reason,created) VALUES (?,?,'pending','',?)",
-                          (topic, resource, time.time()))
+                event_key = resource if topic != 'claims' else resource + ':' + hashlib.sha256(
+                    str(event.get('_id') or event['sent']).encode()).hexdigest()
+                c.execute("INSERT OR IGNORE INTO jobs(topic,resource,state,reason,created,event_key) VALUES (?,?,'pending','',?,?)",
+                          (topic, resource, time.time(), event_key))
             self.put('last_event_at', time.time())
             self.wake.set()
             return JSONResponse({'accepted': True})
@@ -230,7 +245,7 @@ class AutoSupport:
                 raise Review('daily_model_call_limit')
             c.execute('UPDATE usage SET calls=calls+1 WHERE day=?', (day,))
 
-    async def draft(self, facts):
+    async def draft(self, facts, prompt=PROMPT, risk_pattern=RISK):
         payload = json.dumps(facts, ensure_ascii=False)
         if len(payload) > 16000:
             raise Review('context_too_long')
@@ -238,7 +253,7 @@ class AutoSupport:
         async with httpx.AsyncClient(timeout=40, follow_redirects=False) as c:
             r = await c.post('https://api.openai.com/v1/responses',
                 headers={'Authorization': 'Bearer ' + self.env['OPENAI_API_KEY']}, json={
-                    'model': self.env['OPENAI_MODEL'], 'instructions': PROMPT,
+                    'model': self.env['OPENAI_MODEL'], 'instructions': prompt,
                     'input': payload, 'store': False, 'max_output_tokens': 700,
                     'text': {'format': {'type': 'json_schema', 'name': 'support_reply',
                                        'strict': True, 'schema': SCHEMA}}})
@@ -253,7 +268,7 @@ class AutoSupport:
         text = result.get('text', '')
         if (result.get('action') != 'reply' or result.get('risk') is not False
                 or result.get('grounded') is not True or not isinstance(text, str)
-                or not 1 <= len(text.strip()) <= 1000 or RISK.search(text)
+                or not 1 <= len(text.strip()) <= 1000 or risk_pattern.search(text)
                 or re.search(r'https?://|www\.|@|\b\d{7,}\b', text)):
             raise Review('model_requires_review')
         return text
@@ -334,8 +349,7 @@ class AutoSupport:
                 raise Review('paused_before_send')
             result = await self.writes.message(client, self.seller, oid, incoming, conv['conversation_hash'], text)
         elif topic == 'claims':
-            # Never invent a financial API contract. Intake is durable and visible to the owner.
-            raise Review('claim_adapter_not_verified_no_reply_or_refund_sent')
+            return await self.claims.process(client, resource.rsplit('/', 1)[1])
         else:
             raise Review('unsupported_topic')
         state = result.get('state', 'unknown')
@@ -356,6 +370,13 @@ class AutoSupport:
                 self.put('heartbeat', time.time())
                 self.wake.clear()
                 if self.enabled():
+                    if self.claims.enabled() and time.time() - self.get('claims_sweep_attempt', 0) >= 300:
+                        self.put('claims_sweep_attempt', time.time())
+                        try:
+                            await self.sweep_claims()
+                            self.put('claims_sweep_error', None)
+                        except Exception:
+                            self.put('claims_sweep_error', 'claim_sweep_failed_check_permissions_or_contract')
                     with self.db() as c:
                         c.execute('BEGIN IMMEDIATE')
                         row = c.execute("SELECT id,topic,resource FROM jobs WHERE state='pending' ORDER BY id LIMIT 1").fetchone()
@@ -386,6 +407,63 @@ class AutoSupport:
             rows = c.execute("SELECT id,topic,resource,reason,created FROM jobs WHERE state='review' ORDER BY id LIMIT 50 OFFSET ?", (offset,)).fetchall()
         return {'cases': [dict(zip(('id','topic','resource','reason','created'), r)) for r in rows],
                 'next_offset': offset + 50 if len(rows) == 50 else None}
+
+    async def activate_claims(self):
+        if not self.enabled() or self.env.get('NF_CLAIMS_AUTO_ENABLED', '').lower() != 'true':
+            raise Review('Activar atención y configurar NF_CLAIMS_AUTO_ENABLED=true.')
+        client = await self.client()
+        me = await client.get('/users/me')
+        if str(me.get('id')) != self.seller:
+            raise Review('wrong_seller')
+        probe = await client.get('/post-purchase/v1/claims/search', {
+            'players.user_id': self.seller, 'players.role': 'respondent', 'status': 'opened', 'limit': 1})
+        if not isinstance(probe.get('data'), list) or not isinstance(probe.get('paging'), dict):
+            raise Review('claims_read_contract_unverified')
+        if not self.get('claims_cutover'):
+            self.put('claims_cutover', time.time())
+        self.wake.set()
+        return self.status()
+
+    async def sweep_claims(self):
+        """Full pagination before enqueue. Recovery for missed claim notifications; no old backlog writes."""
+        if not self.get('claims_cutover'):
+            return
+        client = await self.client()
+        rows, offset, expected_total = [], 0, None
+        for _ in range(100):
+            page = await client.get('/post-purchase/v1/claims/search', {
+                'players.user_id': self.seller, 'players.role': 'respondent', 'status': 'opened',
+                'limit': 30, 'offset': offset})
+            data, total = page.get('data'), page.get('paging', {}).get('total')
+            if not isinstance(data, list) or not isinstance(total, int) or total < 0:
+                raise Review('claims_search_contract_unverified')
+            if expected_total is not None and total != expected_total:
+                raise Review('claims_search_changed_retry_next_sweep')
+            expected_total = total
+            rows.extend(data)
+            offset += len(data)
+            if offset >= total:
+                break
+            if not data:
+                raise Review('claims_search_incomplete')
+        else:
+            raise Review('claims_search_page_limit')
+        ids = [str(r.get('id')) for r in rows]
+        if len(ids) != len(set(ids)) or len(ids) != expected_total:
+            raise Review('claims_search_incomplete')
+        pending = []
+        for r in rows:
+            cid = str(r.get('id'))
+            if not cid.isdigit():
+                raise Review('invalid_claim_id')
+            if stamp(r['date_created']) < self.get('claims_cutover'):
+                continue
+            revision = str(stamp(r['last_updated']))
+            resource = '/post-purchase/v1/claims/' + cid
+            pending.append(('claims', resource, time.time(), resource + ':revision:' + revision))
+        with self.db() as c:
+            c.executemany("INSERT OR IGNORE INTO jobs(topic,resource,state,reason,created,event_key) VALUES (?,?,'pending','',?,?)", pending)
+        self.put('last_claims_sweep_at', time.time())
 
     async def activate(self):
         if not self.configured() or not self.running:

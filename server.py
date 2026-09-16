@@ -724,12 +724,29 @@ def build_app(env=None):
     async def nf_auto_activar(confirmacion: str) -> dict:
         """Activa respuestas de preguntas y posventa FUTURAS sin revisión previa.
         Requiere orden explícita y confirmacion=ACTIVAR_ATENCION. Consume una prueba OpenAI.
-        Los reclamos, reembolsos y cierres NO están automatizados en esta versión.
+        Los reclamos se activan por separado con nf_auto_reclamos_activar; ver nf_auto_estado.
         """
         api()
         if confirmacion != 'ACTIVAR_ATENCION':
             raise ToolError('Se requiere confirmación explícita ACTIVAR_ATENCION.')
         return await auto.activate()
+
+    @mcp.tool(annotations={'readOnlyHint': False, 'destructiveHint': True, 'openWorldHint': True})
+    async def nf_auto_reclamos_activar(confirmacion: str) -> dict:
+        """Activa atención de reclamos NUEVOS, incluidos reembolsos totales y devoluciones
+        para pedidos individuales ARS <40000, con controles y derivación de casos complejos.
+        Requiere orden explícita, NF_CLAIMS_AUTO_ENABLED=true y ACTIVAR_RECLAMOS_40000.
+        No automatiza compensaciones parciales, reposiciones ni la decisión del mediador.
+        """
+        api()
+        if confirmacion != 'ACTIVAR_RECLAMOS_40000':
+            raise ToolError('Se requiere ACTIVAR_RECLAMOS_40000.')
+        return await auto.activate_claims()
+
+    @mcp.tool(annotations=READ)
+    async def nf_reclamo_consultar(claim_id: str) -> dict:
+        """Consulta reclamo, pedido, conversación, historial y acciones permitidas. No escribe."""
+        return await auto.claims.snapshot(api(), claim_id)
 
     @mcp.tool(annotations={'readOnlyHint': False, 'destructiveHint': False, 'openWorldHint': False})
     def nf_auto_pausar() -> dict:
@@ -755,9 +772,9 @@ def build_app(env=None):
     @mcp.custom_route('/healthz', methods=['GET'])
     async def health(request):
         return JSONResponse({'service': 'northfitness-meli', 'configured': True,
-                             'live_account_verified': False, 'mode': 'support-auto-v0.6',
+                             'live_account_verified': False, 'mode': 'support-auto-v0.7',
                              'automatic_replies_enabled': auto.enabled(),
-                             'claims_money_actions_enabled': False})
+                             'claims_money_actions_enabled': auto.claims.enabled()})
 
     app = mcp.http_app(path='/mcp', stateless_http=True)
     app.state.nf_mcp = mcp
