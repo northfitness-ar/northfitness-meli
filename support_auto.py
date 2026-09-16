@@ -22,6 +22,7 @@ from cryptography.fernet import Fernet
 from starlette.responses import JSONResponse, HTMLResponse
 from support_claims import Claims
 from support_ops import Operations
+from question_auto import answer_text, fallback
 
 API = 'https://api.mercadolibre.com'
 SCHEMA = {'type': 'object', 'properties': {
@@ -97,6 +98,12 @@ class AutoSupport:
                 COMMIT;''')
         self.claims = Claims(self)
         self.ops = Operations(self)
+        self.public_question_context = lambda: 'NorthFitness. Accesorios deportivos. Lema: Built to Perform.'
+        if not self.get('questions_v09_migrated'):
+            with self.db() as c:
+                c.execute("UPDATE jobs SET state='pending',reason='' WHERE topic='questions' AND state='review' AND reason IN ('sensitive_question','product_changed','model_requires_review','context_too_long','daily_model_call_limit','openai_unavailable','model_incomplete')")
+                c.execute("UPDATE jobs SET state='pending',reason='' WHERE topic='questions' AND state='ignored' AND reason='older_than_activation'")
+            self.put('questions_v09_migrated', True)
 
     def db(self):
         return sqlite3.connect(self.path, timeout=10)
@@ -114,7 +121,8 @@ class AutoSupport:
         with self.db() as c:
             counts = dict(c.execute('SELECT state,count(*) FROM jobs GROUP BY state'))
         token = self.get('token')
-        return {'version': 'support-auto-v0.8', 'worker_running': self.running,
+        return {'version': 'support-auto-v0.9', 'worker_running': self.running,
+                'public_questions_policy': 'autonomous_reply_or_clarification_no_human_approval',
                 'automatic_replies_enabled': self.enabled(),
                 'configured_for_auto': self.configured(), 'background_authorized': bool(token),
                 'paused': self.get('paused', True), 'queue': counts,
@@ -296,15 +304,11 @@ class AutoSupport:
             q = await self.question_snapshot(client, self.seller, qid)
             if q.get('status') != 'UNANSWERED' or q.get('answer'):
                 return 'ignored', 'already_answered'
-            if stamp(q['date_created']) < self.get('cutover', time.time()):
-                return 'ignored', 'older_than_activation'
-            if RISK.search(q.get('text', '')):
-                raise Review('sensitive_question')
             facts = await self.product_facts(client, str(q['item_id']))
-            text = await self.draft({'channel': 'question', 'question': q['text'], 'product': facts})
+            text = await answer_text(self, client, q, facts)
             # Re-read product state as well as question before sending.
             if facts != await self.product_facts(client, str(q['item_id'])):
-                raise Review('product_changed')
+                text = fallback(q.get('text', ''))
             if not self.enabled():
                 raise Review('paused_before_send')
             result = await self.writes.answer(client, self.seller, qid, q['text'], text)
@@ -396,9 +400,11 @@ class AutoSupport:
                         try:
                             state, reason = await self.process(row[1], row[2])
                         except Review as e:
-                            state, reason = 'review', str(e)
+                            state, reason = ('error' if row[1] == 'questions' else 'review'), str(e)
                         except Exception:
-                            state, reason = 'review', 'processing_error_no_automatic_retry'
+                            state, reason = ('error' if row[1] == 'questions' else 'review'), 'processing_error_no_automatic_retry'
+                        if row[1] == 'questions' and state == 'review':
+                            state = 'error'
                         with self.db() as c:
                             c.execute('UPDATE jobs SET state=?,reason=?,finished=? WHERE id=?', (state, reason, time.time(), row[0]))
                         continue

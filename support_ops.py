@@ -110,7 +110,7 @@ class Operations:
         if len(rows)!=total or len(set(ids))!=len(ids) or any(str(r.get('seller_id'))!=self.w.seller for r in rows):
             raise ValueError('questions_incomplete_or_owner')
         from support_auto import stamp
-        self.enqueue('questions',[r['id'] for r in rows if stamp(r['date_created'])>=self.w.get('cutover',time.time())])
+        self.enqueue('questions',[r['id'] for r in rows])
 
     async def messages(self, client):
         # Rotate through every order in a fully paginated 30-day snapshot.
@@ -141,7 +141,7 @@ class Operations:
         if time.time()-w.get('ops_attempt',0)<300: return
         w.put('ops_attempt',time.time())
         with w.db() as c:
-            reviews=c.execute("SELECT id,topic,resource,reason FROM jobs WHERE state='review'").fetchall()
+            reviews=c.execute("SELECT id,topic,resource,reason FROM jobs WHERE state IN ('review','error')").fetchall()
         for r in reviews:
             self.alert('job:'+str(r[0]),dict(job=r[0],topic=r[1],resource=r[2],reason=r[3]))
         for key in ('claims_sweep_error',):
