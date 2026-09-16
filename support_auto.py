@@ -21,6 +21,7 @@ import httpx
 from cryptography.fernet import Fernet
 from starlette.responses import JSONResponse, HTMLResponse
 from support_claims import Claims
+from support_ops import Operations
 
 API = 'https://api.mercadolibre.com'
 SCHEMA = {'type': 'object', 'properties': {
@@ -95,6 +96,7 @@ class AutoSupport:
                 DROP TABLE jobs_v06;
                 COMMIT;''')
         self.claims = Claims(self)
+        self.ops = Operations(self)
 
     def db(self):
         return sqlite3.connect(self.path, timeout=10)
@@ -112,7 +114,7 @@ class AutoSupport:
         with self.db() as c:
             counts = dict(c.execute('SELECT state,count(*) FROM jobs GROUP BY state'))
         token = self.get('token')
-        return {'version': 'support-auto-v0.7', 'worker_running': self.running,
+        return {'version': 'support-auto-v0.8', 'worker_running': self.running,
                 'automatic_replies_enabled': self.enabled(),
                 'configured_for_auto': self.configured(), 'background_authorized': bool(token),
                 'paused': self.get('paused', True), 'queue': counts,
@@ -120,6 +122,10 @@ class AutoSupport:
                 'claims_policy': 'ARS < 40000 per single-order purchase; refund or return when eligible; complex cases reviewed',
                 'claims_sweep_error': self.get('claims_sweep_error'),
                 'last_claims_sweep_at': self.get('last_claims_sweep_at'),
+                'recovery_questions_error': self.get('ops_questions_error'),
+                'recovery_messages_error': self.get('ops_messages_error'),
+                'email_alerts_configured': self.ops.mail_ready(),
+                'email_alerts_error': self.get('ops_mail_error'),
                 'last_event_at': self.get('last_event_at'), 'last_worker_at': self.get('heartbeat')}
 
     def configured(self):
@@ -369,6 +375,10 @@ class AutoSupport:
             while True:
                 self.put('heartbeat', time.time())
                 self.wake.clear()
+                try:
+                    await self.ops.tick()
+                except Exception:
+                    self.ops.alert('ops_error', {'error': 'Falló ciclo de reportes/recuperación'})
                 if self.enabled():
                     if self.claims.enabled() and time.time() - self.get('claims_sweep_attempt', 0) >= 300:
                         self.put('claims_sweep_attempt', time.time())
@@ -390,7 +400,7 @@ class AutoSupport:
                         except Exception:
                             state, reason = 'review', 'processing_error_no_automatic_retry'
                         with self.db() as c:
-                            c.execute('UPDATE jobs SET state=?,reason=? WHERE id=?', (state, reason, row[0]))
+                            c.execute('UPDATE jobs SET state=?,reason=?,finished=? WHERE id=?', (state, reason, time.time(), row[0]))
                         continue
                 try:
                     await asyncio.wait_for(self.wake.wait(), timeout=3)

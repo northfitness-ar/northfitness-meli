@@ -761,6 +761,58 @@ def build_app(env=None):
         api()
         return auto.review_queue(offset)
 
+    @mcp.tool(annotations=READ)
+    def nf_auto_alertas(offset: int = 0) -> dict:
+        """Bandeja de alertas y resúmenes; envío externo requiere SMTP configurado."""
+        api()
+        return auto.ops.alerts(offset)
+
+    @mcp.tool(annotations=READ)
+    def nf_auto_resumen(fecha: str) -> dict:
+        """Actividad de atención por día YYYY-MM-DD, horario Argentina. No es un balance."""
+        api()
+        return auto.ops.report(fecha)
+
+    @mcp.tool(annotations=READ)
+    def nf_inventario_consultar() -> dict:
+        """Snapshot físico declarado por el titular; no confundir con stock publicado."""
+        api()
+        return auto.get('inventory_snapshot', {'revision': 0, 'data': None})
+
+    @mcp.tool(annotations={'readOnlyHint': False, 'destructiveHint': False, 'openWorldHint': False})
+    def nf_inventario_guardar(datos_json: str, expected_revision: int) -> dict:
+        """Guarda inventario físico explícito con control de versión. No modifica Mercado Libre.
+        JSON: as_of ISO con zona, stock [{sku,warehouse_available,full_available,lead_days,
+        safety_days,target_days,inbound:[{quantity,eta:YYYY-MM-DD}]}], listings
+        [{item_id,variation_id,components:[{sku,quantity}]}]. Kits usan varios componentes.
+        Cantidades libres; excluir reservas, mercadería vendida y evitar duplicar tránsito.
+        """
+        api()
+        from replenishment import validate
+        data = validate(json.loads(datos_json))
+        with auto.db() as c:
+            c.execute('BEGIN IMMEDIATE')
+            row = c.execute("SELECT v FROM config WHERE k='inventory_snapshot'").fetchone()
+            old = json.loads(row[0]) if row else {'revision': 0}
+            if type(expected_revision) is not int or old['revision'] != expected_revision:
+                raise ToolError('Inventario cambió: releer antes de guardar.')
+            result = {'revision': expected_revision+1, 'data': data}
+            c.execute("INSERT OR REPLACE INTO config VALUES ('inventory_snapshot',?)", (json.dumps(result),))
+        return result
+
+    @mcp.tool(annotations=READ)
+    async def nf_reposicion_planificar() -> dict:
+        """Propuesta de compras por SKU con 28 días completos de ventas, paginación completa,
+        inventario físico de hasta 48 horas y pedidos entrantes. No compra ni cambia stock.
+        Requiere nf_inventario_guardar con equivalencias de todas las variantes y kits.
+        """
+        from replenishment import plan
+        client = api()
+        snapshot = auto.get('inventory_snapshot', {})
+        if not snapshot.get('data'):
+            raise ToolError('Falta inventario físico con variantes, kits e ingresos previstos.')
+        return await plan(client, seller, snapshot['data'])
+
     @mcp.custom_route('/support/oauth/callback', methods=['GET'])
     async def support_callback(request):
         return await auto.callback(request)
@@ -772,7 +824,7 @@ def build_app(env=None):
     @mcp.custom_route('/healthz', methods=['GET'])
     async def health(request):
         return JSONResponse({'service': 'northfitness-meli', 'configured': True,
-                             'live_account_verified': False, 'mode': 'support-auto-v0.7',
+                             'live_account_verified': False, 'mode': 'support-auto-v0.8',
                              'automatic_replies_enabled': auto.enabled(),
                              'claims_money_actions_enabled': auto.claims.enabled()})
 
