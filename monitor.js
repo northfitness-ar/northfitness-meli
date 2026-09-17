@@ -27,6 +27,11 @@ async function update(){
   }
   $('coverage').textContent=d.complete_orders+' de '+d.orders_count+' pedidos completos ('+d.coverage_percent+'%)';
   $('ads').textContent=fmt(d.ads)+' · '+d.ads_status.replaceAll('_',' ');$('fixed').textContent=fmt(d.fixed_costs);
+  $('ads').parentElement.hidden=estimate?.ads_included===false;
+  if(estimate?.ads_mode==='closed_day'){
+   $('ads').parentElement.hidden=false;
+   $('ads').textContent=estimate.ads_included?fmt(d.ads)+' · Corte del día siguiente': 'Pendiente del cierre de las 07:00 (Argentina); no descontado';
+  }
   $('rows').replaceChildren();
   for(const order of d.orders){const tr=document.createElement('tr');for(const value of [order.id,order.status,fmt(order.revenue),fmt(order.fee),fmt(order.cogs),fmt(order.margin),order.missing.map(k=>labels[k]||k).join(', ')||'Completo']){const td=document.createElement('td');td.textContent=value;tr.append(td);}$('rows').append(tr);}
   if(!d.orders.length){const tr=document.createElement('tr'),td=document.createElement('td');td.colSpan=7;td.textContent='Sin operaciones en este período.';tr.append(td);$('rows').append(tr);}

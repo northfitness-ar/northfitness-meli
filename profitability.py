@@ -33,6 +33,8 @@ def validate_policy(policy):
         date.fromisoformat(estimate['effective_from'])
         if not estimate.get('source') or estimate.get('refunds') != 'exclude':
             raise ValueError('Estimación requiere fuente y refunds=exclude.')
+        if estimate.get('ads', 'include') not in ('include', 'exclude', 'closed_day'):
+            raise ValueError('Ads debe ser include, exclude o closed_day.')
         for key in ('check_tax_rate', 'iibb_rate'):
             if not ZERO <= amount(estimate[key]) <= 1:
                 raise ValueError('Tasa de estimación inválida.')
@@ -204,12 +206,23 @@ def summarize(orders, policy, day, ads_reported=None):
                 value -= amount(facts['logistics'])
             else:
                 exclusions.append('Envíos pendientes de conciliación excluidos del escenario')
-        for key, expense in (('publicidad', ads), ('gastos_fijos', fixed)):
+        expenses = [('gastos_fijos', fixed)]
+        ads_mode = estimate.get('ads', 'include')
+        ads_included = ads_mode == 'include' or (ads_mode == 'closed_day' and 'ads' in daily)
+        if not ads_included:
+            exclusions.append('Publicidad excluida por instrucción del titular')
+            if ads_mode == 'closed_day':
+                exclusions.append('Resultado antes de Ads: pendiente del cierre de las 07:00 del día siguiente (Argentina)')
+        else:
+            expenses.append(('publicidad', ads))
+        for key, expense in expenses:
             if expense is None:
                 blockers.append(key)
             else:
                 value -= expense
         result['management_estimate'] = {
+            'ads_included': ads_included,
+            'ads_mode': ads_mode,
             'result': money(value) if not blockers else None,
             'check_tax': money(check_tax), 'iibb': money(iibb),
             'tax_base': money(gross), 'sales': money(gross - cancelled),
