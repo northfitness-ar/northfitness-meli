@@ -669,29 +669,11 @@ def build_app(env=None):
         """Una página de órdenes por fecha de creación ISO con zona horaria. No es un balance.
         Incluye estados y cancelaciones; consultar todas las páginas antes de totalizar.
         """
+        from sales_data import orders_page
         try:
-            start, end = datetime.fromisoformat(desde), datetime.fromisoformat(hasta)
-            if start.tzinfo is None or end.tzinfo is None or start >= end or (end-start).days > 31:
-                raise ValueError()
-        except ValueError:
-            raise ToolError('Usá fechas ISO con zona horaria; máximo 31 días y desde anterior a hasta.') from None
-        if offset < 0 or offset > 9900 or offset % 50:
-            raise ToolError('Offset múltiplo de 50 entre 0 y 9900; dividí fechas para períodos mayores.')
-        d = await api().get('/orders/search', {'seller': seller, 'order.date_created.from': desde,
-                          'order.date_created.to': hasta, 'offset': offset, 'limit': 50, 'sort': 'date_asc'})
-        rows = []
-        for r in d.get('results', []):
-            if str(r.get('seller', {}).get('id')) != seller:
-                raise ToolError('Respuesta con vendedor inesperado; no usar estos resultados.')
-            rows.append({k: r.get(k) for k in ('id', 'date_created', 'date_closed', 'status', 'status_detail',
-                        'pack_id', 'total_amount', 'paid_amount', 'currency_id', 'order_items', 'shipping')})
-        total = d.get('paging', {}).get('total')
-        if not rows and isinstance(total, int) and offset < total:
-            raise ToolError('Página vacía antes del total informado; detener y conciliar, no totalizar.')
-        complete = isinstance(total, int) and offset + len(rows) >= total
-        return {'desde': desde, 'hasta': hasta, 'orders': rows, 'reported_total': total,
-                'complete': complete, 'next_offset': None if complete else offset + 50,
-                'warning': 'Página de órdenes; no utilidad. Deducir cargos y costos una sola vez, conciliar cancelaciones y packs.'}
+            return await orders_page(api(), seller, desde, hasta, offset)
+        except (ValueError, KeyError, TypeError) as exc:
+            raise ToolError('Consulta de ventas inconsistente: ' + str(exc)) from None
 
     @mcp.tool(annotations={'readOnlyHint': True, 'openWorldHint': False})
     def nf_contexto(key: str = 'reglas_nf') -> dict:
@@ -818,6 +800,9 @@ def build_app(env=None):
     from mercadopago_reports import register as register_mp
     register_mp(mcp, api, seller)
 
+    from monitor import register as register_monitor, install as install_monitor
+    monitor = register_monitor(mcp, api, auto, seller, data, env)
+
     @mcp.custom_route('/support/oauth/callback', methods=['GET'])
     async def support_callback(request):
         return await auto.callback(request)
@@ -838,6 +823,7 @@ def build_app(env=None):
     app.state.nf_mcp = mcp
     app.state.nf_auto = auto
     install(app, auto)
+    install_monitor(app, monitor, env.get('NF_MONITOR_ENABLED', '').lower() == 'true')
     return app
 
 
