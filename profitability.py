@@ -27,6 +27,15 @@ def money(value):
 def validate_policy(policy):
     if not isinstance(policy, dict) or policy.get('currency') != 'ARS':
         raise ValueError('La configuración debe indicar currency=ARS.')
+    estimate = policy.get('management_estimate')
+    if estimate is not None:
+        from datetime import date
+        date.fromisoformat(estimate['effective_from'])
+        if not estimate.get('source') or estimate.get('refunds') != 'exclude':
+            raise ValueError('Estimación requiere fuente y refunds=exclude.')
+        for key in ('check_tax_rate', 'iibb_rate'):
+            if not ZERO <= amount(estimate[key]) <= 1:
+                raise ValueError('Tasa de estimación inválida.')
     for cost in policy.get('costs', []):
         if not cost.get('sku') or not cost.get('source') or amount(cost['unit_cost']) < 0:
             raise ValueError('Costo requiere SKU, importe no negativo y fuente.')
@@ -162,7 +171,7 @@ def summarize(orders, policy, day, ads_reported=None):
     if fixed is None:
         missing.append('gastos_fijos')
     net = net_orders - ads - fixed if not missing else None
-    return {'day': day, 'gross': money(gross), 'cancelled': money(cancelled),
+    result = {'day': day, 'gross': money(gross), 'cancelled': money(cancelled),
             'sales_after_known_refunds': money(sales), 'ads': money(ads),
             'ads_status': 'conciliado' if 'ads' in daily else 'reportado_provisorio' if ads is not None else 'pendiente',
             'fixed_costs': money(fixed), 'known_product_margin': money(known_margin),
@@ -170,3 +179,40 @@ def summarize(orders, policy, day, ads_reported=None):
             'coverage_percent': round(100 * complete_orders / len(orders), 1) if orders else 100,
             'missing': missing, 'orders': entries, 'status': 'provisorio' if net is not None else 'incompleto',
             'basis': 'ARS con importes de caja; ajuste impositivo conciliado separado. No balance contable ni saldo MP.'}
+    estimate = policy.get('management_estimate')
+    if estimate and day >= estimate['effective_from']:
+        # A separate management scenario, never a fabricated reconciliation.
+        check_tax = amount(money(gross * amount(estimate['check_tax_rate'])))
+        iibb = amount(money(gross * amount(estimate['iibb_rate'])))
+        value = gross - cancelled - check_tax - iibb
+        blockers, exclusions = [], ['Devoluciones excluidas por instrucción del titular']
+        for entry in entries:
+            oid = entry['id']
+            if entry['status'] == 'cancelled':
+                exclusions.append('Cargos residuales de cancelaciones excluidos del escenario')
+                continue
+            if entry['status'] != 'paid':
+                blockers.append(oid + ':estado_no_liquidado')
+                continue
+            for key in ('fee', 'cogs'):
+                if entry[key] is None:
+                    blockers.append(oid + ':' + key)
+                else:
+                    value -= amount(entry[key])
+            facts = policy.get('orders', {}).get(oid, {})
+            if 'logistics' in facts:
+                value -= amount(facts['logistics'])
+            else:
+                exclusions.append('Envíos pendientes de conciliación excluidos del escenario')
+        for key, expense in (('publicidad', ads), ('gastos_fijos', fixed)):
+            if expense is None:
+                blockers.append(key)
+            else:
+                value -= expense
+        result['management_estimate'] = {
+            'result': money(value) if not blockers else None,
+            'check_tax': money(check_tax), 'iibb': money(iibb),
+            'tax_base': money(gross), 'sales': money(gross - cancelled),
+            'missing': blockers, 'exclusions': sorted(set(exclusions)),
+            'basis': 'Escenario de gestión con impuestos estimados sobre bruto, incluidas cancelaciones. No incluye liquidación de IVA.'}
+    return result

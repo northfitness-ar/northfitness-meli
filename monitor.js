@@ -15,6 +15,16 @@ async function update(){
   $('gross').textContent=fmt(d.gross);$('cancelled').textContent=fmt(d.cancelled);$('sales').textContent=fmt(d.sales_after_known_refunds);
   $('net').textContent=d.net_estimate===null?'Sin conciliar':fmt(d.net_estimate);
   $('netnote').textContent=d.net_estimate===null?'Faltan datos: no hay un neto confiable.':'Provisorio; sujeto a devoluciones y cargos posteriores.';
+  const estimate=d.management_estimate;
+  $('nettitle').textContent=estimate?'Resultado de gestión estimado':'Ganancia neta estimada';
+  $('taxes').textContent=estimate?'Cheque: '+fmt(estimate.check_tax)+' · IIBB: '+fmt(estimate.iibb)+' · Base bruta: '+fmt(estimate.tax_base):'Pendiente de configuración';
+  if(estimate){
+   $('sales').textContent=fmt(estimate.sales);
+   $('salestitle').textContent='Ventas menos cancelaciones';
+   $('salesnote').textContent='Devoluciones excluidas del escenario';
+   $('net').textContent=fmt(estimate.result);
+   $('netnote').textContent=estimate.exclusions.join('. ')+'. '+estimate.basis+(estimate.missing.length?' Faltan: '+estimate.missing.join(', '):'');
+  }
   $('coverage').textContent=d.complete_orders+' de '+d.orders_count+' pedidos completos ('+d.coverage_percent+'%)';
   $('ads').textContent=fmt(d.ads)+' · '+d.ads_status.replaceAll('_',' ');$('fixed').textContent=fmt(d.fixed_costs);
   $('rows').replaceChildren();

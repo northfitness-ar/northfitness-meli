@@ -118,7 +118,7 @@ class Monitor:
                     raise ValueError('Ads excede límite de consulta.')
         return total_cost
 
-    async def snapshot(self, day):
+    async def snapshot(self, day, force=False):
         from datetime import date
         target = date.fromisoformat(day)
         today = datetime.now(TZ).date()
@@ -128,7 +128,7 @@ class Monitor:
             with self.db() as c:
                 cached = c.execute('SELECT body,updated_at FROM snapshots WHERE day=?', (day,)).fetchone()
             cfg = self.config()
-            if cached and time.time() - cached[1] < 300:
+            if not force and cached and time.time() - cached[1] < 300:
                 body = json.loads(cached[0])
                 if body['policy_revision'] == cfg['revision']:
                     return body
@@ -242,7 +242,7 @@ def register(mcp, api, auto, seller, data, env):
         if not monitor.authorized(request):
             return JSONResponse({'error': 'Pedí «abrir monitor» en NorthFitness para acceder.'}, status_code=401, headers=HEADERS)
         try:
-            result = await monitor.snapshot(request.query_params.get('date', datetime.now(TZ).date().isoformat()))
+            result = await monitor.snapshot(request.query_params.get('date', datetime.now(TZ).date().isoformat()), force=True)
             return JSONResponse(result, headers=HEADERS)
         except ValueError as exc:
             return JSONResponse({'error': str(exc)}, status_code=503, headers=HEADERS)
