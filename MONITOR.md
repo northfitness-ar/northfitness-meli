@@ -22,6 +22,9 @@ La clasificación del ajuste impositivo debe validarse con el responsable de la 
 - Product Ads reportado una sola vez, marcado provisorio; importe conciliado puede sustituirlo.
 - Configuración persistente con historial y control de revisión. Snapshots conservan fecha y versión.
 - Si falla la consulta se conserva el snapshot anterior y se marca como desactualizado.
+- Cada recarga del panel omite la cache de cinco minutos y vuelve a consultar las ventas.
+- En modo `closed_day`, Ads se descuenta sólo si existe un importe guardado en `days` para la
+  fecha consultada; el valor provisorio informado por la API no cierra el día.
 
 ## Puesta en marcha
 
@@ -40,6 +43,9 @@ La clasificación del ajuste impositivo debe validarse con el responsable de la 
 8. Ejecutar `nf_monitor_abrir` y abrir el enlace personalmente. Guardar el acceso base al monitor
    en el proyecto NorthFitness; la carpeta no ejecuta el servicio. Tras vencer la sesión,
    pedir un nuevo acceso. No guardar enlaces temporales como acceso permanente.
+
+La carga externa de Ads se ejecuta a las 07:00 de Argentina. El monitor no agrega otro scheduler
+para esa carga: consume el importe fechado que ya se haya guardado en la configuración.
 
 ## Contrato de configuración
 
