@@ -815,6 +815,9 @@ def build_app(env=None):
             raise ToolError('Falta inventario físico con variantes, kits e ingresos previstos.')
         return await plan(client, seller, snapshot['data'])
 
+    from mercadopago_reports import register as register_mp
+    register_mp(mcp, api, seller)
+
     @mcp.custom_route('/support/oauth/callback', methods=['GET'])
     async def support_callback(request):
         return await auto.callback(request)
@@ -826,7 +829,8 @@ def build_app(env=None):
     @mcp.custom_route('/healthz', methods=['GET'])
     async def health(request):
         return JSONResponse({'service': 'northfitness-meli', 'configured': True,
-                             'live_account_verified': False, 'mode': 'support-auto-v0.9',
+                             'live_account_verified': False, 'mode': 'support-auto-mp-v0.10',
+                             'mp_configured': bool(os.environ.get('MP_ACCESS_TOKEN', '').strip()),
                              'automatic_replies_enabled': auto.enabled(),
                              'claims_money_actions_enabled': auto.claims.enabled()})
 
