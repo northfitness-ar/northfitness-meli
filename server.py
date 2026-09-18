@@ -973,7 +973,7 @@ def build_app(env=None):
         return JSONResponse({'service': 'northfitness-meli', 'configured': True,
                              'live_account_verified': False, 'mode': 'support-auto-mp-v0.10',
                              'mp_configured': bool(os.environ.get('MP_ACCESS_TOKEN', '').strip()),
-                             'financial_reads_version': '1',
+                             'financial_reads_version': '2-release',
                              'automatic_replies_enabled': auto.enabled(),
                              'claims_money_actions_enabled': auto.claims.enabled(),
                              'runtime': diagnostics.snapshot()})

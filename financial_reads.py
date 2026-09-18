@@ -17,6 +17,46 @@ PAYMENT_FIELDS = ('id', 'status', 'status_detail', 'date_created', 'date_approve
                   'date_last_updated', 'currency_id', 'transaction_amount',
                   'transaction_amount_refunded', 'total_paid_amount', 'shipping_cost',
                   'marketplace_fee', 'coupon_amount', 'installments')
+RELEASE_FIELDS = ('money_release_date', 'money_release_status', 'money_release_schema')
+
+
+def release_timing(payment, order_created, now=None):
+    """Reported release timing; never treat approval or a due date as availability."""
+    now = now or datetime.now(timezone.utc)
+    result = {'classification': 'unknown', 'days_sale_to_reported_release': None,
+              'pending_age_days': None, 'included_in_completed_average': False,
+              'date_basis': 'money_release_date reported by MP; not an independent balance event'}
+    def instant(value):
+        if not isinstance(value, str):
+            return None
+        try:
+            stamp = datetime.fromisoformat(value.replace('Z', '+00:00'))
+            return stamp.astimezone(timezone.utc) if stamp.utcoffset() is not None else None
+        except ValueError:
+            return None
+    created = instant(order_created)
+    released = instant(payment.get('money_release_date'))
+    state = payment.get('money_release_status')
+    status = payment.get('status')
+    if status in ('refunded', 'charged_back', 'cancelled', 'rejected'):
+        result['classification'] = 'excluded_payment_status'
+        return result
+    refunded = payment.get('transaction_amount_refunded')
+    if refunded is None or type(refunded) not in (int, float) or refunded != 0:
+        result['classification'] = 'refund_review'
+        return result
+    if created is None or created > now or status != 'approved':
+        return result
+    if state == 'released':
+        if released is None or not created <= released <= now:
+            result['classification'] = 'inconsistent_release_date'
+            return result
+        result.update(classification='released', included_in_completed_average=True,
+                      days_sale_to_reported_release=round((released-created).total_seconds()/86400, 6))
+    elif state in ('pending', 'held'):
+        result.update(classification='pending',
+                      pending_age_days=round((now-created).total_seconds()/86400, 6))
+    return result
 
 
 def identifier(value):
@@ -154,7 +194,7 @@ def payment_view(payment, payment_id, seller):
     if (not isinstance(payment, dict) or str(payment.get('id')) != payment_id or
             str(payment.get('collector_id')) != str(seller)):
         raise ToolError('El pago no corresponde a la operación/cuenta autorizada.')
-    result = fields(payment, PAYMENT_FIELDS)
+    result = fields(payment, PAYMENT_FIELDS + RELEASE_FIELDS)
     result['transaction_details'] = fields(payment.get('transaction_details') or {},
                                          ('net_received_amount', 'total_paid_amount',
                                           'overpaid_amount', 'installment_amount'))
@@ -214,6 +254,7 @@ async def reconcile_order(client, mp, seller, order_id):
         key = identifier(row['id'])
         raw = await mp.request('GET', '/v1/payments/' + key)
         payment = payment_view(raw, key, seller)
+        payment['release_timing'] = release_timing(raw, order.get('date_created'))
         refunds = await mp.request('GET', '/v1/payments/' + key + '/refunds')
         if not isinstance(refunds, list) or len(refunds) > 1000:
             raise ToolError('Reembolsos con formato inesperado; no totalizar.')

@@ -5,6 +5,8 @@ import pytest
 from fastmcp.exceptions import ToolError
 from financial_reads import billing, payment_summary, reconcile_order
 from sales_data import orders_page
+from financial_reads import release_timing
+from datetime import datetime, timezone
 
 
 def run(coro):
@@ -145,3 +147,31 @@ def test_invalid_batch_does_not_call_api(ids):
     with pytest.raises(ToolError):
         run(billing(ml, '7', ids))
     assert not ml.calls
+
+
+@pytest.mark.parametrize('state,date,classification,days', [
+    ('released', '2026-09-12T10:00:00-03:00', 'released', 2),
+    ('released', '2026-10-12T10:00:00-03:00', 'inconsistent_release_date', None),
+    ('released', None, 'inconsistent_release_date', None),
+    ('released', '2026-09-12T10:00:00', 'inconsistent_release_date', None),
+    ('pending', '2026-09-12T10:00:00-03:00', 'pending', None),
+    ('held', '2026-09-22T10:00:00-03:00', 'pending', None),
+    (None, '2026-09-12T10:00:00-03:00', 'unknown', None),
+])
+def test_release_date_needs_confirmed_status(state, date, classification, days):
+    p = {'status': 'approved', 'transaction_amount_refunded': 0,
+         'money_release_status': state, 'money_release_date': date}
+    r = release_timing(p, '2026-09-10T10:00:00-03:00', datetime(2026,9,18,13,tzinfo=timezone.utc))
+    assert r['classification'] == classification
+    assert r['days_sale_to_reported_release'] == days
+    assert r['included_in_completed_average'] == (classification == 'released')
+    assert r['pending_age_days'] == (8 if classification == 'pending' else None)
+
+
+def test_refunded_and_partial_refund_excluded_from_normal_release_average():
+    p = {'status': 'refunded', 'transaction_amount_refunded': 100,
+         'money_release_status': 'released', 'money_release_date': '2026-09-12T13:00:00Z'}
+    now = datetime(2026,9,18,13,tzinfo=timezone.utc)
+    assert release_timing(p, '2026-09-10T13:00:00Z', now)['classification'] == 'excluded_payment_status'
+    p['status'] = 'approved'
+    assert release_timing(p, '2026-09-10T13:00:00Z', now)['classification'] == 'refund_review'

@@ -2,6 +2,18 @@
 
 ## Consultas financieras por operación
 
+La versión `2-release` amplía la salida de `nf_venta_conciliar`, sin cambiar sus
+argumentos: expone money_release_date/status/schema y release_timing por pago.
+Sólo status approved, refunded=0, money_release_status=released y fecha coherente
+habilitan el plazo observado desde la creación de la orden. Pending/held muestran
+antigüedad pendiente; fecha programada vencida no demuestra disponibilidad.
+La fecha es la informada por MP, no un evento independiente del saldo. Para cerrar
+un plazo efectivo de caja, contrastar con movimientos de dinero disponible cuando
+haya retenciones o diferencias. Cancelaciones/contracargos/reembolsos se revisan aparte.
+Al agregar, deduplicar payment_id, separar monedas, informar cobertura y pendientes;
+el promedio de operaciones liberadas no representa automáticamente toda la cohorte.
+No calcular pendientes como cero días ni atribuirle el mismo dinero a varias órdenes.
+
 `nf_ventas` agrega `payments` (proyección financiera sin datos del comprador) y
 `last_updated`, sin sumar pagos compartidos ni cambiar el criterio de fecha.
 
