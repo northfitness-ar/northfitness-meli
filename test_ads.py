@@ -152,3 +152,24 @@ def test_reservation_across_instances(tmp_path):
  assert s2.reserve('status001','request',base)['state']=='unknown'
  with pytest.raises(ToolError):s2.reserve('status002','other',base)
  with pytest.raises(ToolError):s2.reserve('status001','other',base)
+
+@pytest.mark.parametrize('status,body,codes',[
+ (401,{'error':'invalid_token','message':'secret bearer credential'},['invalid_token']),
+ (403,{'code':'forbidden','cause':[{'code':'insufficient_scope'}]},['forbidden','insufficient_scope']),
+ (401,{'error':'secret-value','access_token':'secret-value'},[]),
+ (401,['unexpected','secret-value'],[]),
+ (500,{'error':'bad_request'},['bad_request']),
+])
+def test_write_errors_preserve_only_safe_diagnostics(status,body,codes):
+ async def run():
+  count=0
+  def handler(req):
+   nonlocal count
+   count+=1
+   return httpx.Response(status,json=body)
+  r=await MeliAPI('test',httpx.MockTransport(handler)).put_stock('/test',{'budget':2000})
+  assert r['state']==('unknown' if status>=500 else 'rejected')
+  assert r['provider_error_codes']==codes and count==1
+  assert 'secret' not in json.dumps(r)
+  if status in (401,403):assert r['retry_allowed'] is False
+ asyncio.run(run())

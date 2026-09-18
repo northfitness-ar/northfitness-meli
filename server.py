@@ -72,8 +72,33 @@ class MeliAPI:
             r = await self.request('PUT', path, json=payload, headers=headers or {})
         except httpx.RequestError:
             return {'state': 'unknown', 'http_status': None}
-        return {'state': 'accepted' if 200 <= r.status_code < 300 else 'rejected',
-                'http_status': r.status_code}
+        result = {'state': 'accepted' if 200 <= r.status_code < 300 else
+                  ('unknown' if r.status_code >= 500 else 'rejected'),
+                  'http_status': r.status_code}
+        if r.status_code >= 400:
+            # Return only known provider error codes, never raw messages, headers or tokens.
+            known_codes = {'unauthorized', 'forbidden', 'invalid_token', 'expired_token',
+                           'invalid_scope', 'insufficient_scope', 'access_denied',
+                           'invalid_client', 'not_found', 'bad_request', 'validation_error'}
+            try:
+                body = r.json()
+            except ValueError:
+                body = None
+            codes = []
+            if isinstance(body, dict):
+                candidates = [body.get('error'), body.get('code')]
+                causes = body.get('cause', [])
+                if isinstance(causes, list):
+                    candidates += [cause.get('code') for cause in causes if isinstance(cause, dict)]
+                codes = sorted({code.lower() for code in candidates
+                                if isinstance(code, str) and code.lower() in known_codes})
+            result['provider_error_codes'] = codes
+            if r.status_code in (401, 403):
+                result['authorization_action'] = 'review_existing_connection_and_ads_permissions'
+                result['retry_allowed'] = False
+                result['warning'] = ('No repetir la escritura. Revisar autorización de la aplicación '
+                                     'y acceso a Product Ads; HTTP por sí solo no identifica la causa.')
+        return result
 
     async def post_message(self, path, payload, params=None):
         # Never retry a POST after an uncertain result, nor follow redirects with a token.

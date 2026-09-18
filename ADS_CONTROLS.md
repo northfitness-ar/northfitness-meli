@@ -55,3 +55,19 @@ las herramientas del conector. Comprobar que aparecen ambos nombres nuevos. Hast
 entonces, esta conversación sigue disponiendo solo del ajuste de presupuesto.
 No se requieren nuevas variables de entorno ni cambios de credenciales; si la API
 responde 401/403, revisar los permisos de la integración existente.
+
+## Diagnóstico de autorización
+
+Los PUT ahora conservan códigos de error reconocidos (`invalid_token`,
+`insufficient_scope`, etc.), sin cuerpo libre, tokens ni cabeceras. Los HTTP
+401/403 no se reintentan. La operación rechazada previamente no conserva ese
+cuerpo y no permite reconstruir la causa exacta retrospectivamente.
+
+El OAuth del servidor ya solicita `read write offline_access`. No agregar
+`write` artificialmente a MeliVerifier: sus scopes locales no prueban permisos
+concedidos por Mercado Libre y no corrigen un 401 del proveedor. Revisar los
+permisos efectivos de la aplicación en Mercado Libre y renovar la conexión del
+conector mediante el flujo oficial del titular. La autorización del worker de
+atención es independiente; no usar su token como sustituto para sortear el rechazo.
+Tras revisar la autorización y completar cualquier consentimiento requerido,
+consultar la campaña otra vez antes de una nueva operación expresamente autorizada.
