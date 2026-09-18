@@ -105,8 +105,14 @@ class AutoSupport:
                 c.execute("UPDATE jobs SET state='pending',reason='' WHERE topic='questions' AND state='ignored' AND reason='older_than_activation'")
             self.put('questions_v09_migrated', True)
 
+    @contextlib.contextmanager
     def db(self):
-        return sqlite3.connect(self.path, timeout=10)
+        connection = sqlite3.connect(self.path, timeout=10)
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     def get(self, key, default=None):
         with self.db() as c:
@@ -514,3 +520,4 @@ def install(app, worker):
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
     app.router.lifespan_context = lifespan
+

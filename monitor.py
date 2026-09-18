@@ -32,8 +32,14 @@ class Monitor:
             CREATE TABLE IF NOT EXISTS sessions (hash TEXT PRIMARY KEY, kind TEXT, expires REAL);
             ''')
 
+    @contextlib.contextmanager
     def db(self):
-        return sqlite3.connect(self.path, timeout=15)
+        connection = sqlite3.connect(self.path, timeout=15)
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     def config(self):
         with self.db() as c:
@@ -275,3 +281,4 @@ def install(app, monitor, enabled):
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
     app.router.lifespan_context = lifespan
+
