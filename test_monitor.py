@@ -112,7 +112,7 @@ def test_one_use_link_cookie_and_revision(tmp_path):
 def test_stale_cache_on_failure(tmp_path):
     import json,time
     m=Monitor(tmp_path,None,'237699011','https://nf.example')
-    day=datetime.now().date().isoformat()
+    day=datetime.now(TZ).date().isoformat()
     with m.db() as c:c.execute('INSERT INTO snapshots VALUES(?,?,?)',(day,json.dumps({'policy_revision':0,'net_estimate':'100','fetched_at':'old'}),time.time()-400))
     assert asyncio.run(m.snapshot(day))['stale'] is True
 
@@ -169,8 +169,11 @@ def test_routes_require_private_session(tmp_path):
          'JWT_SIGNING_KEY':'x'*48,'STORAGE_ENCRYPTION_KEY':Fernet.generate_key().decode(),'NF_DATA_DIR':str(tmp_path)}
     app=build_app(env)
     with TestClient(app,base_url='https://nf.example') as c:
+        runtime = c.get('/healthz').json()['runtime']
+        assert runtime['rss_bytes'] > 0 and runtime['asyncio_tasks'] >= 1
         assert c.get('/monitor/data').status_code==401
         assert c.get('/monitor').status_code==200
         assert c.get('/monitor/assets/monitor.js').status_code==200
         assert c.post('/monitor/session',json={'token':'bad'}).status_code==403
         assert c.post('/monitor/session',json={'token':'bad'},headers={'Origin':'https://nf.example'}).status_code==401
+    assert app.state.nf_http_client.is_closed
