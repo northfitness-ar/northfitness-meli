@@ -18,6 +18,7 @@ import httpx
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.server.auth import OAuthProxy, TokenVerifier, AccessToken
+from oauth_diagnostics import DiagnosticOAuthProxy, CLAIM as OAUTH_EVIDENCE_CLAIM
 from fastmcp.server.dependencies import get_access_token
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse
@@ -639,7 +640,7 @@ def build_app(env=None):
     diagnostics = RuntimeDiagnostics()
     http_client = httpx.AsyncClient(timeout=20, follow_redirects=False,
                                     limits=httpx.Limits(max_connections=20, max_keepalive_connections=10))
-    auth = OAuthProxy(
+    auth = DiagnosticOAuthProxy(
         upstream_authorization_endpoint='https://auth.mercadolibre.com.ar/authorization',
         upstream_token_endpoint=API + '/oauth/token',
         upstream_client_id=env['MELI_CLIENT_ID'], upstream_client_secret=env['MELI_CLIENT_SECRET'],
@@ -756,6 +757,7 @@ def build_app(env=None):
         """Prueba acceso a Product Ads y lista anunciantes de Argentina autorizados. No confundir advertiser_id con seller_id."""
         d = await api().get('/advertising/advertisers', {'product_id': 'PADS'}, headers={'api-version': '1'})
         return {'advertisers': [a for a in d.get('advertisers', []) if a.get('site_id') == 'MLA'],
+                'oauth_diagnostics': (get_access_token().claims or {}).get(OAUTH_EVIDENCE_CLAIM, {'available': False}),
                 'fetched_at': datetime.now(timezone.utc).isoformat()}
 
     @mcp.tool(annotations=READ)
