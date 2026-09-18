@@ -951,6 +951,9 @@ def build_app(env=None):
     from price_tools import register as register_prices
     register_prices(mcp, api, seller, data)
 
+    from listing_tools import register as register_listings
+    register_listings(mcp, api, seller, data)
+
     from monitor import register as register_monitor, install as install_monitor
     monitor = register_monitor(mcp, api, auto, seller, data, env)
 
