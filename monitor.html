@@ -10,8 +10,9 @@
 <body><main>
  <header>
   <div class="identity"><img src="/monitor/assets/northfitness-logo.jpg" alt="NorthFitness"><h1>Monitor de rentabilidad</h1></div>
-  <div class="controls"><label for="day">Fecha</label><div><input id="day" type="date"><button id="refresh">Actualizar</button></div></div>
+  <div class="controls"><label for="period">Vista</label><select id="period"><option value="day">Diario</option><option value="week">Semanal</option><option value="month">Mensual</option></select><label for="day">Fecha</label><div><input id="day" type="date"><button id="refresh">Actualizar</button></div></div>
  </header>
+ <div class="livebar"><span id="live">CONECTANDO</span><time id="clock"></time><span id="range"></span></div><p id="comparison"></p>
  <p id="state" role="status">Verificando acceso…</p>
  <section class="cards" aria-label="Resumen">
   <article><h2>Ventas brutas</h2><strong id="gross">—</strong></article>
@@ -19,11 +20,13 @@
   <article class="net"><h2>Resultado estimado</h2><strong id="net">—</strong></article>
  </section>
  <section class="metrics" aria-label="Costos del día">
-  <article><h2>Impuesto al cheque</h2><strong id="checktax">—</strong></article>
-  <article><h2>IIBB</h2><strong id="iibb">—</strong></article>
-  <article><h2>Gastos fijos de un día</h2><strong id="fixed">—</strong></article>
+  <article><h2>Impuesto al cheque · 0,6%</h2><strong id="checktax">—</strong></article>
+  <article><h2>IIBB · 2%</h2><strong id="iibb">—</strong></article>
+  <article><h2>Gastos fijos del período</h2><strong id="fixed">—</strong></article>
   <article><h2>Costo total de mercadería vendida</h2><strong id="merchandise">—</strong></article>
-  <article><h2>Ads del día seleccionado</h2><strong id="ads">—</strong></article>
+  <article><h2>Ads del período</h2><strong id="ads">—</strong></article>
+  <article><h2>Comisiones</h2><strong id="fees">—</strong></article>
+  <article><h2>Logística registrada</h2><strong id="logistics">—</strong><small id="logisticsstate"></small></article>
  </section>
  <section class="details">
   <h2>Productos vendidos</h2>
@@ -33,4 +36,9 @@
    <tfoot><tr><th colspan="2">TOTAL GENERAL</th><th id="totalunits">—</th><th></th><th id="totalmerchandise">—</th></tr></tfoot>
   </table></div>
  </section>
-</main></body></html>
+<section class="details"><h2>Órdenes <span id="ordercount"></span></h2>
+ <label for="search">Buscar orden o producto</label><input id="search" type="search" placeholder="Número, producto o variante">
+ <div class="tablewrap"><table><thead><tr><th>Fecha y hora</th><th>Orden</th><th>Estado</th><th>Producto y variante</th><th>Unidades</th><th>Venta</th><th>Comisión</th><th>Mercadería</th><th>Margen</th></tr></thead><tbody id="orders"></tbody></table></div>
+ <div class="pager"><button id="prev">Anterior</button><span id="page"></span><button id="next">Siguiente</button></div>
+ </section></main></body></html>
+

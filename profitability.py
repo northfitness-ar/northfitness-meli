@@ -39,6 +39,11 @@ def validate_policy(policy):
         for key in ('check_tax_rate', 'iibb_rate'):
             if not ZERO <= amount(estimate[key]) <= 1:
                 raise ValueError('Tasa de estimación inválida.')
+    for rule in policy.get('fixed_cost_schedule', []):
+        from datetime import date
+        date.fromisoformat(rule['effective_from'])
+        if amount(rule['daily_cost']) < 0 or not rule.get('source'):
+            raise ValueError('Gasto fijo requiere importe y fuente.')
     for cost in policy.get('costs', []):
         if not cost.get('sku') or not cost.get('source') or amount(cost['unit_cost']) < 0:
             raise ValueError('Costo requiere SKU, importe no negativo y fuente.')
@@ -120,14 +125,15 @@ def sold_products_add(groups, policy, item, qty, stamp):
     variant_key = listing_key if is_kit else variant
     row = group['variants'].setdefault(variant_key, {'variant': variant, 'units': 0,
         'unit_cost': unit if known else None, 'total_cost': ZERO if known else None,
-        'components': components, 'listing_keys': set()})
+        'components': components if is_kit else [], 'listing_keys': set()})
     # An explicit product/variant map may unify listings only when their computed unit cost agrees.
-    if row['unit_cost'] != (unit if known else None):
+    if not known:
         row['unit_cost'] = row['total_cost'] = None
     row['units'] += qty
     row['listing_keys'].add(listing_key)
     if row['total_cost'] is not None:
         row['total_cost'] += unit * qty
+        row['unit_cost'] = row['total_cost'] / row['units']
 
 
 def sold_products_result(groups):
@@ -149,6 +155,14 @@ def sold_products_result(groups):
         products.append({'product': group['product'], 'variants': variants, 'units': product_units,
                          'total_cost': money(product_cost) if product_complete else None})
     return products, general_units, money(general_cost) if complete else None
+
+
+def daily_facts(policy, day):
+    daily = dict(policy.get('days', {}).get(day, {}))
+    applicable = [r for r in policy.get('fixed_cost_schedule', []) if r['effective_from'] <= day]
+    if 'fixed_costs' not in daily and applicable:
+        daily['fixed_costs'] = max(applicable, key=lambda r: r['effective_from'])['daily_cost']
+    return daily
 
 
 def summarize(orders, policy, day, ads_reported=None):
@@ -242,10 +256,15 @@ def summarize(orders, policy, day, ads_reported=None):
             net_orders += net
             complete_orders += 1
         missing.extend(oid + ':' + gap for gap in gaps)
-        entries.append({'id': oid, 'status': status, 'revenue': money(net_revenue),
+        entries.append({'id': oid, 'status': status, 'date_created': order['date_created'],
+                        'items': [{'product': policy.get('products', {}).get(str(l['item']['id']) + ':' + str(l['item'].get('variation_id') or ''), {}).get('name', l['item'].get('title', l['item']['id'])),
+                                   'variant': policy.get('products', {}).get(str(l['item']['id']) + ':' + str(l['item'].get('variation_id') or ''), {}).get('variant', variant_label(l['item'])),
+                                   'units': l['quantity']} for l in lines],
+                        'logistics': money(logistics) if 'logistics' in facts else None,
+                        'revenue': money(net_revenue),
                         'fee': money(fee) if fee_known else None, 'cogs': money(cogs) if cost_known else None,
                         'margin': money(margin), 'net': money(net), 'missing': gaps})
-    daily = policy.get('days', {}).get(day, {})
+    daily = daily_facts(policy, day)
     ads = amount(daily['ads']) if 'ads' in daily else ads_reported
     fixed = amount(daily['fixed_costs']) if 'fixed_costs' in daily else None
     if ads is None:
@@ -267,8 +286,8 @@ def summarize(orders, policy, day, ads_reported=None):
     estimate = policy.get('management_estimate')
     if estimate and day >= estimate['effective_from']:
         # A separate management scenario, never a fabricated reconciliation.
-        check_tax = amount(money(gross * amount(estimate['check_tax_rate'])))
-        iibb = amount(money(gross * amount(estimate['iibb_rate'])))
+        check_tax = amount(money((gross - cancelled) * amount(estimate['check_tax_rate'])))
+        iibb = amount(money((gross - cancelled) * amount(estimate['iibb_rate'])))
         value = gross - cancelled - check_tax - iibb
         blockers, exclusions = [], ['Devoluciones excluidas por instrucción del titular']
         for entry in entries:
@@ -308,7 +327,52 @@ def summarize(orders, policy, day, ads_reported=None):
             'ads_mode': ads_mode,
             'result': money(value) if not blockers else None,
             'check_tax': money(check_tax), 'iibb': money(iibb),
-            'tax_base': money(gross), 'sales': money(gross - cancelled),
+            'tax_base': money(gross - cancelled), 'sales': money(gross - cancelled),
             'missing': blockers, 'exclusions': sorted(set(exclusions)),
-            'basis': 'Escenario de gestión con impuestos estimados sobre bruto, incluidas cancelaciones. No incluye liquidación de IVA.'}
+            'basis': 'Escenario de gestión con impuestos estimados sobre ventas menos cancelaciones. No incluye liquidación de IVA.'}
     return result
+
+
+def summarize_period(orders, policy, start, end):
+    """Aggregate daily expenses and dated merchandise without partial complete totals."""
+    from datetime import timedelta
+    from zoneinfo import ZoneInfo
+    tz = ZoneInfo('America/Argentina/Buenos_Aires')
+    daily_orders = {}
+    for order in orders:
+        stamp = instant(order['date_created'])
+        if not start <= stamp < end:
+            continue
+        day = stamp.astimezone(tz).date().isoformat()
+        daily_orders.setdefault(day, []).append(order)
+    days, cursor = [], start.date()
+    while cursor <= (end - timedelta(microseconds=1)).date():
+        days.append(cursor.isoformat())
+        cursor += timedelta(days=1)
+    results = [summarize(daily_orders.get(day, []), policy, day) for day in days]
+    def total(values):
+        return None if any(v is None for v in values) else money(sum((amount(v) for v in values), ZERO))
+    groups = {}
+    for day_orders in daily_orders.values():
+        for order in day_orders:
+            if order['status'] == 'paid':
+                for line in order['order_items']:
+                    sold_products_add(groups, policy, line['item'], line['quantity'], instant(order['date_created']))
+    products, units, cost = sold_products_result(groups)
+    estimates = [r.get('management_estimate', {}) for r in results]
+    ads_days = [day for day in days if 'ads' in daily_facts(policy, day)]
+    entries = sorted([o for r in results for o in r['orders']], key=lambda o: (o.get('date_created', ''), o['id']), reverse=True)
+    return {'day': start.date().isoformat(), 'period_start': start.isoformat(), 'period_end': end.isoformat(),
+        'gross': total([r['gross'] for r in results]), 'cancelled': total([r['cancelled'] for r in results]),
+        'fixed_costs': total([r['fixed_costs'] for r in results]), 'sold_products': products,
+        'sold_units': units, 'merchandise_cost': cost, 'orders': entries, 'orders_count': len(entries),
+        'ads': total([daily_facts(policy, day)['ads'] for day in ads_days]) if ads_days else None,
+        'ads_status': 'conciliado' if len(ads_days) == len(days) else 'pendiente',
+        'ads_missing_days': len(days) - len(ads_days), 'days_count': len(days),
+        'management_estimate': {'result': total([e.get('result') for e in estimates]),
+            'check_tax': total([e.get('check_tax') for e in estimates]),
+            'iibb': total([e.get('iibb') for e in estimates]),
+            'tax_base': total([e.get('tax_base') for e in estimates])},
+        'fees': total([o.get('fee') for o in entries if o['status'] == 'paid']),
+        'logistics_known': total([o['logistics'] for o in entries if o.get('logistics') is not None and o['status'] == 'paid']) if any(o.get('logistics') is not None for o in entries if o['status'] == 'paid') or not any(o['status'] == 'paid' for o in entries) else None,
+        'logistics_missing_orders': sum(o.get('logistics') is None for o in entries if o['status'] == 'paid')}

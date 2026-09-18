@@ -2,6 +2,7 @@
 import asyncio
 import base64
 import contextlib
+import copy
 import hashlib
 import json
 import secrets
@@ -12,7 +13,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 from starlette.responses import HTMLResponse, JSONResponse
 from sales_data import all_orders
-from profitability import summarize, validate_policy, amount
+from profitability import summarize, summarize_period, validate_policy, amount
 
 TZ = ZoneInfo('America/Argentina/Buenos_Aires')
 HEADERS = {'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer',
@@ -29,6 +30,7 @@ class Monitor:
             c.executescript('''CREATE TABLE IF NOT EXISTS config (id INTEGER PRIMARY KEY, revision INTEGER, body TEXT);
             CREATE TABLE IF NOT EXISTS policy_history (revision INTEGER PRIMARY KEY, body TEXT, saved_at REAL);
             CREATE TABLE IF NOT EXISTS snapshots (day TEXT PRIMARY KEY, body TEXT, updated_at REAL);
+            CREATE TABLE IF NOT EXISTS shipping_costs (shipment TEXT PRIMARY KEY, body TEXT, updated_at REAL);
             CREATE TABLE IF NOT EXISTS sessions (hash TEXT PRIMARY KEY, kind TEXT, expires REAL);
             ''')
 
@@ -123,8 +125,8 @@ class Monitor:
         from datetime import date
         target = date.fromisoformat(day)
         today = datetime.now(TZ).date()
-        if not today - timedelta(days=31) <= target <= today:
-            raise ValueError('Elegí una fecha entre hoy y los últimos 31 días.')
+        if not today - timedelta(days=366) <= target <= today:
+            raise ValueError('Elegí una fecha entre hoy y los últimos 366 días.')
         async with self.lock:
             with self.db() as c:
                 cached = c.execute('SELECT body,updated_at FROM snapshots WHERE day=?', (day,)).fetchone()
@@ -140,7 +142,8 @@ class Monitor:
                 rows, excluded = await all_orders(client, self.seller, start.isoformat(), end.isoformat())
                 ads, ads_error = None, None
                 try:
-                    ads = await self.ads(client, day)
+                    if cfg['policy'].get('management_estimate', {}).get('ads') == 'include':
+                        ads = await self.ads(client, day)
                 except Exception:
                     ads_error = 'Publicidad no disponible; no se reemplazó por cero.'
                 result = summarize(rows, cfg['policy'], day, ads)
@@ -156,6 +159,120 @@ class Monitor:
                     old.update(stale=True, error='Falló la actualización; se conserva la última lectura con su fecha.')
                     return old
                 raise ValueError('No se pudo obtener una lectura completa. Revisar autorización de lectura y datos del monitor.') from None
+
+    async def shipping_policy(self, client, rows, policy):
+        """Bounded reads. Never duplicate pack freight or infer it from free_shipping."""
+        enriched = copy.deepcopy(policy)
+        facts = enriched.setdefault('orders', {})
+        shipments = {}
+        for row in rows:
+            sid = (row.get('shipping') or {}).get('id')
+            if row.get('status') == 'paid' and sid and 'logistics' not in facts.get(str(row['id']), {}):
+                shipments.setdefault(str(sid), []).append(row)
+        budget = 8
+        deadline = time.monotonic() + 8
+        for sid, shipment_orders in shipments.items():
+            with self.db() as c:
+                cached = c.execute('SELECT body,updated_at FROM shipping_costs WHERE shipment=?', (sid,)).fetchone()
+            allocation = None
+            if cached and time.time() - cached[1] < 3600:
+                allocation = json.loads(cached[0])
+            elif budget and time.monotonic() < deadline:
+                budget -= 1
+                try:
+                    costs = await asyncio.wait_for(client.get('/shipments/' + sid + '/costs'), timeout=2)
+                    senders = [x for x in costs.get('senders', []) if str(x.get('user_id')) == str(self.seller)]
+                    if len(senders) != 1:
+                        continue
+                    cost = amount(senders[0]['cost'])
+                    if cost < 0:
+                        continue
+                    items = await asyncio.wait_for(client.get('/shipments/' + sid + '/items'), timeout=2)
+                    if not isinstance(items, list) or not items:
+                        continue
+                    ids = {str(x['order_id']) for x in items}
+                    available = {str(x['id']): x for x in shipment_orders}
+                    # Mixed/out-of-period or cancelled packs require reconciliation.
+                    if ids != set(available):
+                        continue
+                    weights = {oid: sum((amount(l['unit_price']) * l['quantity'] for l in o['order_items']), amount(0)) for oid, o in available.items()}
+                    total_weight = sum(weights.values(), amount(0))
+                    if total_weight <= 0:
+                        continue
+                    from profitability import money
+                    remaining, allocation = amount(money(cost)), {}
+                    ordered = sorted(weights)
+                    for oid in ordered[:-1]:
+                        value = amount(money(cost * weights[oid] / total_weight))
+                        allocation[oid] = str(value)
+                        remaining -= value
+                    allocation[ordered[-1]] = str(remaining)
+                    with self.db() as c:
+                        c.execute('INSERT OR REPLACE INTO shipping_costs VALUES(?,?,?)', (sid, json.dumps(allocation), time.time()))
+                except Exception:
+                    continue
+            if allocation:
+                for row in shipment_orders:
+                    oid = str(row['id'])
+                    if oid in allocation:
+                        entry = facts.setdefault(oid, {'source': 'Mercado Libre: costo del remitente por envío'})
+                        entry['logistics'] = allocation[oid]
+        with self.db() as c:
+            c.execute('DELETE FROM shipping_costs WHERE updated_at < ?', (time.time()-86400*370,))
+        return enriched
+
+    async def period(self, day, mode='day'):
+        from datetime import date
+        target, now = date.fromisoformat(day), datetime.now(TZ)
+        if mode not in ('day', 'week', 'month'):
+            raise ValueError('Período inválido.')
+        if not now.date() - timedelta(days=366) <= target <= now.date():
+            raise ValueError('Elegí una fecha de los últimos 366 días.')
+        first = target if mode == 'day' else target - timedelta(days=target.weekday()) if mode == 'week' else target.replace(day=1)
+        start = datetime.combine(first, datetime.min.time(), TZ)
+        if mode == 'month':
+            stop = (start.replace(day=28) + timedelta(days=4)).replace(day=1)
+        else:
+            stop = start + timedelta(days=7 if mode == 'week' else 1)
+        end = min(stop, now)
+        # Shift by whole weeks: same weekdays and identical elapsed duration.
+        shift = timedelta(days=28 if mode == 'month' else 7)
+        key = 'period:' + mode + ':' + first.isoformat()
+        requested_at = time.time()
+        async with self.lock:
+            cfg = self.config()
+            with self.db() as c:
+                cached = c.execute('SELECT body,updated_at FROM snapshots WHERE day=?', (key,)).fetchone()
+            if cached and cached[1] >= requested_at:
+                shared = json.loads(cached[0])
+                if shared.get('policy_revision') == cfg['revision']:
+                    return shared
+            try:
+                client = await self.auto.client()
+                rows, excluded = await all_orders(client, self.seller, start.isoformat(), end.isoformat())
+                effective_policy = await self.shipping_policy(client, rows, cfg['policy'])
+                result = summarize_period(rows, effective_policy, start, end)
+                result.update(fetched_at=datetime.now(TZ).isoformat(), policy_revision=cfg['revision'],
+                              stale=False, refresh_seconds=30, mode=mode, excluded_out_of_range=excluded)
+                try:
+                    previous, _ = await all_orders(client, self.seller, (start-shift).isoformat(), (end-shift).isoformat())
+                    comparison = summarize_period(previous, cfg['policy'], start-shift, end-shift)
+                    current_sales = amount(result['gross']) - amount(result['cancelled'])
+                    previous_sales = amount(comparison['gross']) - amount(comparison['cancelled'])
+                    result['comparison'] = {'start': (start-shift).isoformat(), 'end': (end-shift).isoformat(),
+                        'sales': str(previous_sales), 'percent': str((current_sales-previous_sales)*100/previous_sales) if previous_sales else None}
+                except Exception:
+                    result['comparison'] = None
+                with self.db() as c:
+                    c.execute('INSERT OR REPLACE INTO snapshots VALUES(?,?,?)', (key, json.dumps(result), time.time()))
+                    c.execute("DELETE FROM snapshots WHERE day LIKE 'period:%' AND updated_at < ?", (time.time()-86400*2,))
+                return result
+            except Exception:
+                if cached:
+                    old = json.loads(cached[0])
+                    old.update(stale=True, error='No se pudo actualizar.')
+                    return old
+                raise ValueError('No se pudo obtener una lectura completa.') from None
 
     async def run(self):
         # Existing deployment is single-process. Read-only and independent of reply activation.
@@ -202,7 +319,7 @@ def register(mcp, api, auto, seller, data, env):
 
     @mcp.tool(annotations={'readOnlyHint': True, 'openWorldHint': True})
     async def nf_monitor_resumen(fecha: str) -> dict:
-        """Monitor por día de Argentina, últimos 31 días. Cache 5 minutos; neto nulo si faltan costos/conciliación."""
+        """Monitor por día de Argentina, últimos 366 días. Cache 5 minutos; neto nulo si faltan costos/conciliación."""
         api()
         try:
             return await monitor.snapshot(fecha)
@@ -252,7 +369,7 @@ def register(mcp, api, auto, seller, data, env):
         if not monitor.authorized(request):
             return JSONResponse({'error': 'Pedí «abrir monitor» en NorthFitness para acceder.'}, status_code=401, headers=HEADERS)
         try:
-            result = await monitor.snapshot(request.query_params.get('date', datetime.now(TZ).date().isoformat()), force=True)
+            result = await monitor.period(request.query_params.get('date', datetime.now(TZ).date().isoformat()), request.query_params.get('period', 'day'))
             return JSONResponse(result, headers=HEADERS)
         except ValueError as exc:
             return JSONResponse({'error': str(exc)}, status_code=503, headers=HEADERS)
@@ -275,3 +392,4 @@ def install(app, monitor, enabled):
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
     app.router.lifespan_context = lifespan
+
