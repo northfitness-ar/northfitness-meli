@@ -4,8 +4,8 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 import pytest
 from sales_data import orders_page, all_orders, interval
-from profitability import summarize, validate_policy
-from monitor import Monitor
+from profitability import summarize, validate_policy, amount
+from monitor import Monitor, TZ
 
 DAY='2026-09-17'
 START=DAY+'T12:00:00-03:00'
@@ -112,9 +112,54 @@ def test_one_use_link_cookie_and_revision(tmp_path):
 def test_stale_cache_on_failure(tmp_path):
     import json,time
     m=Monitor(tmp_path,None,'237699011','https://nf.example')
-    day=datetime.now().date().isoformat()
+    day=datetime.now(TZ).date().isoformat()
     with m.db() as c:c.execute('INSERT INTO snapshots VALUES(?,?,?)',(day,json.dumps({'policy_revision':0,'net_estimate':'100','fetched_at':'old'}),time.time()-400))
     assert asyncio.run(m.snapshot(day))['stale'] is True
+
+def test_forced_snapshot_fetches_new_data_on_every_call(tmp_path, monkeypatch):
+    """The web refresh path must never reuse the five-minute background cache."""
+    calls = []
+
+    class Auto:
+        async def client(self):
+            return object()
+
+    async def fresh_orders(client, seller, start, end):
+        calls.append((client, seller, start, end))
+        current = order(len(calls), datetime.now(timezone.utc).isoformat())
+        current['order_items'][0]['unit_price'] = str(100 * len(calls))
+        return [current], 0
+
+    async def no_ads(self, client, day):
+        return None
+
+    monkeypatch.setattr('monitor.all_orders', fresh_orders)
+    monkeypatch.setattr(Monitor, 'ads', no_ads)
+    monitor = Monitor(tmp_path, Auto(), '237699011', 'https://nf.example')
+    day = datetime.now(TZ).date().isoformat()
+
+    first = asyncio.run(monitor.snapshot(day, force=True))
+    second = asyncio.run(monitor.snapshot(day, force=True))
+
+    assert first['gross'] == '200.00'
+    assert second['gross'] == '400.00'
+    assert len(calls) == 2
+
+def test_closed_day_uses_only_ads_saved_for_requested_date():
+    p = policy()
+    p['management_estimate'] = {'effective_from': '2026-09-01', 'source': 'criterio gerencial',
+                                'refunds': 'exclude', 'ads': 'closed_day',
+                                'check_tax_rate': '0', 'iibb_rate': '0'}
+    other_day = '2026-09-16'
+    p['days'][other_day] = {'fixed_costs': '2', 'source': 'balance'}
+
+    closed = summarize([order()], p, DAY, ads_reported=amount('999'))['management_estimate']
+    still_open = summarize([order()], p, other_day, ads_reported=amount('999'))['management_estimate']
+
+    assert closed['ads_included'] is True
+    assert closed['result'] == '105.18'
+    assert still_open['ads_included'] is False
+    assert still_open['result'] == '115.18'
 
 def test_routes_require_private_session(tmp_path):
     from server import build_app
@@ -124,8 +169,11 @@ def test_routes_require_private_session(tmp_path):
          'JWT_SIGNING_KEY':'x'*48,'STORAGE_ENCRYPTION_KEY':Fernet.generate_key().decode(),'NF_DATA_DIR':str(tmp_path)}
     app=build_app(env)
     with TestClient(app,base_url='https://nf.example') as c:
+        runtime = c.get('/healthz').json()['runtime']
+        assert runtime['rss_bytes'] > 0 and runtime['asyncio_tasks'] >= 1
         assert c.get('/monitor/data').status_code==401
         assert c.get('/monitor').status_code==200
         assert c.get('/monitor/assets/monitor.js').status_code==200
         assert c.post('/monitor/session',json={'token':'bad'}).status_code==403
         assert c.post('/monitor/session',json={'token':'bad'},headers={'Origin':'https://nf.example'}).status_code==401
+    assert app.state.nf_http_client.is_closed
