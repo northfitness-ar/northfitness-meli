@@ -1,11 +1,12 @@
 import asyncio
 import copy
+import hashlib
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 import pytest
 from sales_data import orders_page, all_orders, interval
-from profitability import summarize, validate_policy
-from monitor import Monitor
+from profitability import summarize, validate_policy, amount
+from monitor import Monitor, TZ
 
 DAY='2026-09-17'
 START=DAY+'T12:00:00-03:00'
@@ -73,7 +74,46 @@ def test_historical_cost_not_replaced_by_future_cost():
 
 def test_kit_components():
     p=policy();p['kits']={'MLA1:':[{'sku':'S','quantity':3}]}
-    assert summarize([order()],p,DAY)['orders'][0]['cogs']=='180.00'
+    result=summarize([order()],p,DAY)
+    assert result['orders'][0]['cogs']=='180.00'
+    assert result['sold_products'][0]['variants'][0]['unit_cost']=='90.00'
+    assert result['sold_products'][0]['total_cost']=='180.00'
+
+def test_products_group_only_with_explicit_mapping_and_exclude_cancelled():
+    first=order()
+    first['order_items'][0]['item'].update(title='Guantes',variation_id=10,
+        variation_attributes=[{'name':'Color','value_name':'Negro'},{'name':'Talle','value_name':'M'}])
+    second=order(2);second['order_items'][0]['item'].update(id='MLA2',title='Guantes NF',variation_id=20)
+    cancelled=order(3);cancelled['status']='cancelled'
+    p=policy();p['orders'].update({
+        '2':{'refund':'0','logistics':'0','tax_adjustment':'0','source':'liquidacion'},
+        '3':{'fee':'0','cogs':'0','logistics':'0','tax_adjustment':'0','source':'liquidacion'}})
+    p['products']={'MLA1:10':{'name':'Guantes genéricos','variant':'Negro · M'},
+                   'MLA2:20':{'name':'Guantes NF','variant':'Negro · M'}}
+    result=summarize([first,second,cancelled],p,DAY)
+    assert [(x['product'],x['units']) for x in result['sold_products']]==[
+        ('Guantes genéricos',2),('Guantes NF',2)]
+    assert result['sold_units']==4 and result['merchandise_cost']=='120.00'
+
+def test_missing_product_cost_never_returns_partial_total():
+    p=policy();p['costs']=[]
+    result=summarize([order()],p,DAY)
+    variant=result['sold_products'][0]['variants'][0]
+    assert variant['unit_cost'] is None and variant['total_cost'] is None
+    assert result['sold_products'][0]['total_cost'] is None
+    assert result['merchandise_cost'] is None
+
+def test_publications_unify_only_through_verified_product_map():
+    one=order();one['order_items'][0]['item'].update(title='Producto',variation_id=1)
+    two=order(2);two['order_items'][0]['item'].update(id='MLA2',title='Producto',variation_id=2)
+    p=policy();p['orders']['2']={'refund':'0','logistics':'0','tax_adjustment':'0','source':'liquidacion'}
+    separate=summarize([one,two],p,DAY)
+    assert len(separate['sold_products'])==2
+    p['products']={'MLA1:1':{'name':'Producto verificado','variant':'Rojo · M'},
+                   'MLA2:2':{'name':'Producto verificado','variant':'Rojo · M'}}
+    unified=summarize([one,two],p,DAY)
+    assert len(unified['sold_products'])==1
+    assert unified['sold_products'][0]['variants'][0]['units']==4
 
 def test_cancellation_preserves_expenses():
     o=order();o['status']='cancelled';p=policy();p['orders']['1'].update(fee='4',cogs='0')
@@ -112,9 +152,54 @@ def test_one_use_link_cookie_and_revision(tmp_path):
 def test_stale_cache_on_failure(tmp_path):
     import json,time
     m=Monitor(tmp_path,None,'237699011','https://nf.example')
-    day=datetime.now().date().isoformat()
+    day=datetime.now(TZ).date().isoformat()
     with m.db() as c:c.execute('INSERT INTO snapshots VALUES(?,?,?)',(day,json.dumps({'policy_revision':0,'net_estimate':'100','fetched_at':'old'}),time.time()-400))
     assert asyncio.run(m.snapshot(day))['stale'] is True
+
+def test_forced_snapshot_fetches_new_data_on_every_call(tmp_path, monkeypatch):
+    """The web refresh path must never reuse the five-minute background cache."""
+    calls = []
+
+    class Auto:
+        async def client(self):
+            return object()
+
+    async def fresh_orders(client, seller, start, end):
+        calls.append((client, seller, start, end))
+        current = order(len(calls), datetime.now(timezone.utc).isoformat())
+        current['order_items'][0]['unit_price'] = str(100 * len(calls))
+        return [current], 0
+
+    async def no_ads(self, client, day):
+        return None
+
+    monkeypatch.setattr('monitor.all_orders', fresh_orders)
+    monkeypatch.setattr(Monitor, 'ads', no_ads)
+    monitor = Monitor(tmp_path, Auto(), '237699011', 'https://nf.example')
+    day = datetime.now(TZ).date().isoformat()
+
+    first = asyncio.run(monitor.snapshot(day, force=True))
+    second = asyncio.run(monitor.snapshot(day, force=True))
+
+    assert first['gross'] == '200.00'
+    assert second['gross'] == '400.00'
+    assert len(calls) == 2
+
+def test_closed_day_uses_only_ads_saved_for_requested_date():
+    p = policy()
+    p['management_estimate'] = {'effective_from': '2026-09-01', 'source': 'criterio gerencial',
+                                'refunds': 'exclude', 'ads': 'closed_day',
+                                'check_tax_rate': '0', 'iibb_rate': '0'}
+    other_day = '2026-09-16'
+    p['days'][other_day] = {'fixed_costs': '2', 'source': 'balance'}
+
+    closed = summarize([order()], p, DAY, ads_reported=amount('999'))['management_estimate']
+    still_open = summarize([order()], p, other_day, ads_reported=amount('999'))['management_estimate']
+
+    assert closed['ads_included'] is True
+    assert closed['result'] == '105.18'
+    assert still_open['ads_included'] is False
+    assert still_open['result'] == '115.18'
 
 def test_routes_require_private_session(tmp_path):
     from server import build_app
@@ -124,8 +209,15 @@ def test_routes_require_private_session(tmp_path):
          'JWT_SIGNING_KEY':'x'*48,'STORAGE_ENCRYPTION_KEY':Fernet.generate_key().decode(),'NF_DATA_DIR':str(tmp_path)}
     app=build_app(env)
     with TestClient(app,base_url='https://nf.example') as c:
+        runtime = c.get('/healthz').json()['runtime']
+        assert runtime['rss_bytes'] > 0 and runtime['asyncio_tasks'] >= 1
         assert c.get('/monitor/data').status_code==401
         assert c.get('/monitor').status_code==200
         assert c.get('/monitor/assets/monitor.js').status_code==200
+        logo=c.get('/monitor/assets/northfitness-logo.jpg')
+        assert logo.status_code==200 and logo.headers['content-type']=='image/jpeg'
+        assert hashlib.sha256(logo.content).hexdigest()=='52c0a5f2db09d9d36881ff8ba3f8a9f3f7f461e9eaa78bd1b74b36b027b786d6'
+        assert "img-src 'self'" in logo.headers['content-security-policy']
         assert c.post('/monitor/session',json={'token':'bad'}).status_code==403
         assert c.post('/monitor/session',json={'token':'bad'},headers={'Origin':'https://nf.example'}).status_code==401
+    assert app.state.nf_http_client.is_closed

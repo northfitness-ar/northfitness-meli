@@ -7,6 +7,7 @@ import sqlite3
 import json
 import asyncio
 import hashlib
+import contextlib
 from decimal import Decimal, InvalidOperation
 from datetime import date
 from datetime import datetime, timezone
@@ -21,23 +22,43 @@ from fastmcp.server.dependencies import get_access_token
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse
 from starlette.routing import Route
+from runtime_diagnostics import RuntimeDiagnostics
 
 API = 'https://api.mercadolibre.com'
 READ = {'readOnlyHint': True, 'destructiveHint': False, 'openWorldHint': True}
 
 
 class MeliAPI:
-    def __init__(self, token, transport=None):
+    def __init__(self, token, transport=None, client=None, diagnostics=None):
         self.token = token
         self.transport = transport
+        self.client = client
+        self.diagnostics = diagnostics
+
+    async def request(self, method, path, **kwargs):
+        """Use the application pool when available; standalone clients remain testable."""
+        if self.diagnostics:
+            self.diagnostics.request_started()
+        failed = False
+        try:
+            headers = {**kwargs.pop('headers', {}), 'Authorization': 'Bearer ' + self.token}
+            if self.client is not None:
+                return await self.client.request(method, API + path, headers=headers, **kwargs)
+            async with httpx.AsyncClient(transport=self.transport, timeout=20, follow_redirects=False) as client:
+                return await client.request(method, API + path, headers=headers, **kwargs)
+        except httpx.RequestError:
+            failed = True
+            raise
+        finally:
+            if self.diagnostics:
+                self.diagnostics.request_finished(failed)
 
     async def get(self, path, params=None, headers=None):
         # Only code-defined paths are used. Never follow redirects with credentials.
-        async with httpx.AsyncClient(transport=self.transport, timeout=20, follow_redirects=False) as c:
-            try:
-                r = await c.get(API + path, params=params, headers={**(headers or {}), 'Authorization': 'Bearer ' + self.token})
-            except httpx.RequestError:
-                raise ToolError('Mercado Libre no respondió. No se modificó nada.') from None
+        try:
+            r = await self.request('GET', path, params=params, headers=headers or {})
+        except httpx.RequestError:
+            raise ToolError('Mercado Libre no respondió. No se modificó nada.') from None
         if r.status_code != 200:
             raise ToolError(f'Mercado Libre devolvió HTTP {r.status_code}. Datos no disponibles; no interpretar como cero.')
         try:
@@ -47,23 +68,19 @@ class MeliAPI:
 
 
     async def put_stock(self, path, payload, headers=None):
-        async with httpx.AsyncClient(transport=self.transport, timeout=20, follow_redirects=False) as c:
-            try:
-                r = await c.put(API + path, json=payload,
-                                headers={**(headers or {}), 'Authorization': 'Bearer ' + self.token})
-            except httpx.RequestError:
-                return {'state': 'unknown', 'http_status': None}
+        try:
+            r = await self.request('PUT', path, json=payload, headers=headers or {})
+        except httpx.RequestError:
+            return {'state': 'unknown', 'http_status': None}
         return {'state': 'accepted' if 200 <= r.status_code < 300 else 'rejected',
                 'http_status': r.status_code}
 
     async def post_message(self, path, payload, params=None):
         # Never retry a POST after an uncertain result, nor follow redirects with a token.
-        async with httpx.AsyncClient(transport=self.transport, timeout=20, follow_redirects=False) as c:
-            try:
-                r = await c.post(API + path, json=payload, params=params,
-                                 headers={'Authorization': 'Bearer ' + self.token})
-            except httpx.RequestError:
-                return {'state': 'unknown', 'http_status': None}
+        try:
+            r = await self.request('POST', path, json=payload, params=params)
+        except httpx.RequestError:
+            return {'state': 'unknown', 'http_status': None}
         result = {'state': 'accepted' if 200 <= r.status_code < 300 else
                   ('unknown' if r.status_code >= 500 else 'rejected'), 'http_status': r.status_code}
         try:
@@ -429,14 +446,16 @@ class SupportWrites:
 
 
 class MeliVerifier(TokenVerifier):
-    def __init__(self, seller_id, transport=None):
+    def __init__(self, seller_id, transport=None, client=None, diagnostics=None):
         super().__init__(required_scopes=['read'])
         self.seller_id = seller_id
         self.transport = transport
+        self.client = client
+        self.diagnostics = diagnostics
 
     async def verify_token(self, token):
         try:
-            me = await MeliAPI(token, self.transport).get('/users/me')
+            me = await MeliAPI(token, self.transport, self.client, self.diagnostics).get('/users/me')
         except ToolError:
             return None
         if str(me.get('id')) != self.seller_id:
@@ -503,11 +522,14 @@ def build_app(env=None):
     store = FernetEncryptionWrapper(key_value=DiskStore(directory=str(data / 'oauth')),
                                     fernet=Fernet(env['STORAGE_ENCRYPTION_KEY'].encode()))
     seller = env['MELI_SELLER_ID']
+    diagnostics = RuntimeDiagnostics()
+    http_client = httpx.AsyncClient(timeout=20, follow_redirects=False,
+                                    limits=httpx.Limits(max_connections=20, max_keepalive_connections=10))
     auth = OAuthProxy(
         upstream_authorization_endpoint='https://auth.mercadolibre.com.ar/authorization',
         upstream_token_endpoint=API + '/oauth/token',
         upstream_client_id=env['MELI_CLIENT_ID'], upstream_client_secret=env['MELI_CLIENT_SECRET'],
-        token_verifier=MeliVerifier(seller), base_url=env['BASE_URL'].rstrip('/'),
+        token_verifier=MeliVerifier(seller, client=http_client, diagnostics=diagnostics), base_url=env['BASE_URL'].rstrip('/'),
         redirect_path='/auth/callback', valid_scopes=['read', 'write', 'offline_access'],
         extra_authorize_params={'scope': 'read write offline_access'},
         forward_pkce=True, forward_resource=False, token_endpoint_auth_method='client_secret_post',
@@ -520,7 +542,10 @@ def build_app(env=None):
     ads_changes = AdsChanges(data / 'ads_changes.sqlite3')
     support_writes = SupportWrites(data / 'support_sends.sqlite3')
     from support_auto import AutoSupport, install
-    auto = AutoSupport(env, data, MeliAPI, support_writes, question_snapshot, conversation_snapshot)
+    def api_factory(token):
+        return MeliAPI(token, client=http_client, diagnostics=diagnostics)
+
+    auto = AutoSupport(env, data, api_factory, support_writes, question_snapshot, conversation_snapshot)
     auto.public_question_context = lambda: (notes.read('atencion_contexto_publico').get('text') or
         'NorthFitness, marca argentina de accesorios deportivos. Lema: Built to Perform. Atención cordial en español argentino. Consultas de compras por el canal privado del pedido.')
     mcp = FastMCP('NorthFitness Gestión', auth=auth, instructions=(
@@ -533,7 +558,7 @@ def build_app(env=None):
         token = get_access_token()
         if token is None or token.subject != seller:
             raise ToolError('Autorización de NorthFitness requerida.')
-        return MeliAPI(token.token)
+        return api_factory(token.token)
 
     @mcp.tool(annotations=READ)
     async def nf_preguntas_consultar(status: str = 'UNANSWERED', offset: int = 0) -> dict:
@@ -817,13 +842,26 @@ def build_app(env=None):
                              'live_account_verified': False, 'mode': 'support-auto-mp-v0.10',
                              'mp_configured': bool(os.environ.get('MP_ACCESS_TOKEN', '').strip()),
                              'automatic_replies_enabled': auto.enabled(),
-                             'claims_money_actions_enabled': auto.claims.enabled()})
+                             'claims_money_actions_enabled': auto.claims.enabled(),
+                             'runtime': diagnostics.snapshot()})
 
     app = mcp.http_app(path='/mcp', stateless_http=True)
     app.state.nf_mcp = mcp
     app.state.nf_auto = auto
+    app.state.nf_http_client = http_client
+    app.state.nf_diagnostics = diagnostics
     install(app, auto)
     install_monitor(app, monitor, env.get('NF_MONITOR_ENABLED', '').lower() == 'true')
+    original = app.router.lifespan_context
+
+    @contextlib.asynccontextmanager
+    async def lifespan(app):
+        try:
+            async with original(app):
+                yield
+        finally:
+            await http_client.aclose()
+    app.router.lifespan_context = lifespan
     return app
 
 

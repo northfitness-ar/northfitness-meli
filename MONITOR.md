@@ -22,6 +22,9 @@ La clasificación del ajuste impositivo debe validarse con el responsable de la 
 - Product Ads reportado una sola vez, marcado provisorio; importe conciliado puede sustituirlo.
 - Configuración persistente con historial y control de revisión. Snapshots conservan fecha y versión.
 - Si falla la consulta se conserva el snapshot anterior y se marca como desactualizado.
+- Cada recarga del panel omite la cache de cinco minutos y vuelve a consultar las ventas.
+- En modo `closed_day`, Ads se descuenta sólo si existe un importe guardado en `days` para la
+  fecha consultada; el valor provisorio informado por la API no cierra el día.
 
 ## Puesta en marcha
 
@@ -41,6 +44,9 @@ La clasificación del ajuste impositivo debe validarse con el responsable de la 
    en el proyecto NorthFitness; la carpeta no ejecuta el servicio. Tras vencer la sesión,
    pedir un nuevo acceso. No guardar enlaces temporales como acceso permanente.
 
+La carga externa de Ads se ejecuta a las 07:00 de Argentina. El monitor no agrega otro scheduler
+para esa carga: consume el importe fechado que ya se haya guardado en la configuración.
+
 ## Contrato de configuración
 
 Todos los importes se expresan en ARS mediante cadenas decimales. `currency` debe ser `ARS`.
@@ -50,6 +56,9 @@ Se reemplaza la configuración completa, con control de versión e historial: le
   con una base consistente con el ajuste impositivo. ISO con zona para la vigencia.
 - `kits`: objeto con clave `item_id:variation_id` (variante ausente: `MLA123:`), valor
   lista `{sku, quantity}`. No se calcula con márgenes comerciales históricos fijos.
+- `products`: mapeo explícito por `item_id:variation_id` a `{name, variant}`. Sólo este mapeo
+  permite unificar publicaciones bajo un producto y variante; nunca se infiere por títulos parecidos.
+  Los kits permanecen separados aunque compartan nombre y su costo suma los componentes de `kits`.
 - `orders`: objeto por ID de orden **como texto**, con `source` y campos conciliados:
   - `refund`: importe reintegrado de una venta pagada; cero solamente si fue verificado.
   - `fee`: comisión neta **total de la orden**, sustituye `sale_fee × quantity`.
