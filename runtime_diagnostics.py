@@ -16,6 +16,14 @@ def resident_bytes():
         return int(high_water * (1024 if os.name == 'posix' else 1))
 
 
+def open_file_descriptors():
+    try:
+        with os.scandir('/proc/self/fd') as entries:
+            return sum(1 for _ in entries)
+    except OSError:
+        return None
+
+
 class RuntimeDiagnostics:
     """Small counters only: no URLs, headers, tokens, payloads, or task names."""
     def __init__(self):
@@ -45,6 +53,7 @@ class RuntimeDiagnostics:
         return {
             'uptime_seconds': round(time.time() - self.started_at, 1),
             'rss_bytes': rss,
+            'open_file_descriptors': open_file_descriptors(),
             'rss_change_bytes': rss - self.initial_rss,
             'asyncio_tasks': len(tasks),
             'asyncio_pending_tasks': sum(not task.done() for task in tasks),
@@ -53,3 +62,4 @@ class RuntimeDiagnostics:
             'meli_requests_active': self.meli_active,
             'meli_requests_peak_active': self.meli_peak_active,
         }
+
