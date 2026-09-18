@@ -28,6 +28,26 @@ API = 'https://api.mercadolibre.com'
 READ = {'readOnlyHint': True, 'destructiveHint': False, 'openWorldHint': True}
 
 
+def safe_read_failure(exc):
+    """Turn expected provider read failures into a small, non-secret diagnostic."""
+    message = str(exc)
+    match = re.search(r'Mercado Libre devolvió HTTP ([0-9]{3})', message)
+    status = int(match.group(1)) if match else None
+    result = {
+        'available': False,
+        'error_code': f'provider_http_{status}' if status is not None else 'provider_read_unavailable',
+        'http_status': status,
+        'fetched_at': datetime.now(timezone.utc).isoformat(),
+        'warning': 'Datos no disponibles; no interpretar como cero.',
+    }
+    if status in (401, 403):
+        result.update(
+            authorization_action='review_existing_connection_and_ads_permissions',
+            retry_allowed=False,
+        )
+    return result
+
+
 class MeliAPI:
     def __init__(self, token, transport=None, client=None, diagnostics=None):
         self.token = token
@@ -741,36 +761,42 @@ def build_app(env=None):
     @mcp.tool(annotations=READ)
     async def nf_ads_campanas(advertiser_id: str, desde: str = '', hasta: str = '', offset: int = 0) -> dict:
         """Una página de campañas con presupuesto y métricas opcionales YYYY-MM-DD. Recorrer next_offset hasta complete antes de sumar. Ads atribuidas NO son ventas adicionales ni utilidad; métricas pueden tener demora."""
-        client = api()
-        await ads_account(client, advertiser_id)
-        if offset < 0 or offset > 100000:
-            raise ToolError('Offset no negativo; máximo 100000.')
-        params = {'limit': 50, 'offset': offset}
-        if desde or hasta:
-            try:
-                start, end = date.fromisoformat(desde), date.fromisoformat(hasta)
-                if start > end or (end-start).days > 89:
-                    raise ValueError()
-            except ValueError:
-                raise ToolError('Ambas fechas YYYY-MM-DD; rango de hasta 90 días.') from None
-            params.update(date_from=desde, date_to=hasta, metrics=ADS_METRICS)
-        d = await client.get(f'/advertising/MLA/advertisers/{advertiser_id}/product_ads/campaigns/search', params, headers=ADS_HEADERS)
-        rows, paging = d.get('results'), d.get('paging', {})
-        total = paging.get('total')
-        if not isinstance(rows, list) or type(total) is not int or total < 0 or (not rows and offset < total):
-            raise ToolError('Paginación incompleta o inesperada: no sumar.')
-        if any(str(r.get('advertiser_id')) != advertiser_id for r in rows):
-            raise ToolError('Campañas de anunciante inesperado.')
-        complete = offset + len(rows) >= total
-        return {'campaigns': rows, 'reported_total': total, 'complete': complete,
-                'next_offset': None if complete else offset + len(rows), 'desde': desde, 'hasta': hasta,
-                'fetched_at': datetime.now(timezone.utc).isoformat(),
-                'warning': 'Métricas atribuidas por Ads, no utilidad ni cobros. La hora de consulta no garantiza actualización de métricas hasta esa hora.'}
+        try:
+            client = api()
+            await ads_account(client, advertiser_id)
+            if offset < 0 or offset > 100000:
+                raise ToolError('Offset no negativo; máximo 100000.')
+            params = {'limit': 50, 'offset': offset}
+            if desde or hasta:
+                try:
+                    start, end = date.fromisoformat(desde), date.fromisoformat(hasta)
+                    if start > end or (end-start).days > 89:
+                        raise ValueError()
+                except ValueError:
+                    raise ToolError('Ambas fechas YYYY-MM-DD; rango de hasta 90 días.') from None
+                params.update(date_from=desde, date_to=hasta, metrics=ADS_METRICS)
+            d = await client.get(f'/advertising/MLA/advertisers/{advertiser_id}/product_ads/campaigns/search', params, headers=ADS_HEADERS)
+            rows, paging = d.get('results'), d.get('paging', {})
+            total = paging.get('total')
+            if not isinstance(rows, list) or type(total) is not int or total < 0 or (not rows and offset < total):
+                raise ToolError('Paginación incompleta o inesperada: no sumar.')
+            if any(str(r.get('advertiser_id')) != advertiser_id for r in rows):
+                raise ToolError('Campañas de anunciante inesperado.')
+            complete = offset + len(rows) >= total
+            return {'available': True, 'campaigns': rows, 'reported_total': total, 'complete': complete,
+                    'next_offset': None if complete else offset + len(rows), 'desde': desde, 'hasta': hasta,
+                    'fetched_at': datetime.now(timezone.utc).isoformat(),
+                    'warning': 'Métricas atribuidas por Ads, no utilidad ni cobros. La hora de consulta no garantiza actualización de métricas hasta esa hora.'}
+        except ToolError as exc:
+            return safe_read_failure(exc)
 
     @mcp.tool(annotations=READ)
     async def nf_ads_campana(advertiser_id: str, campaign_id: str) -> dict:
         """Consulta configuración actual de una campaña argentina; usar antes de cambiar presupuesto, estado o ROAS."""
-        return await ads_campaign(api(), advertiser_id, campaign_id)
+        try:
+            return {'available': True, **await ads_campaign(api(), advertiser_id, campaign_id)}
+        except ToolError as exc:
+            return safe_read_failure(exc)
 
     @mcp.tool(annotations={'readOnlyHint': False, 'destructiveHint': True, 'idempotentHint': True, 'openWorldHint': True})
     async def nf_ads_presupuesto_fijar(advertiser_id: str, campaign_id: str, presupuesto_ars: str,

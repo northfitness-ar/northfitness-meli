@@ -4,7 +4,7 @@ import json
 import httpx
 import pytest
 from fastmcp.exceptions import ToolError
-from server import AdsChanges, MeliAPI
+from server import AdsChanges, MeliAPI, safe_read_failure
 
 class Fake:
  def __init__(self):
@@ -173,3 +173,17 @@ def test_write_errors_preserve_only_safe_diagnostics(status,body,codes):
   assert 'secret' not in json.dumps(r)
   if status in (401,403):assert r['retry_allowed'] is False
  asyncio.run(run())
+
+
+@pytest.mark.parametrize('message,status,code', [
+ ('Mercado Libre devolvió HTTP 401. Datos no disponibles; no interpretar como cero.', 401, 'provider_http_401'),
+ ('Mercado Libre devolvió HTTP 503. Datos no disponibles; no interpretar como cero.', 503, 'provider_http_503'),
+ ('Mercado Libre no respondió. No se modificó nada.', None, 'provider_read_unavailable'),
+])
+def test_safe_read_failure_exposes_no_provider_body(message,status,code):
+ result=safe_read_failure(ToolError(message))
+ assert result['available'] is False
+ assert result['http_status']==status and result['error_code']==code
+ assert 'Datos no disponibles' in result['warning']
+ if status==401:
+  assert result['retry_allowed'] is False
