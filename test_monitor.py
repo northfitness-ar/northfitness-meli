@@ -1,5 +1,6 @@
 import asyncio
 import copy
+import hashlib
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 import pytest
@@ -73,7 +74,46 @@ def test_historical_cost_not_replaced_by_future_cost():
 
 def test_kit_components():
     p=policy();p['kits']={'MLA1:':[{'sku':'S','quantity':3}]}
-    assert summarize([order()],p,DAY)['orders'][0]['cogs']=='180.00'
+    result=summarize([order()],p,DAY)
+    assert result['orders'][0]['cogs']=='180.00'
+    assert result['sold_products'][0]['variants'][0]['unit_cost']=='90.00'
+    assert result['sold_products'][0]['total_cost']=='180.00'
+
+def test_products_group_only_with_explicit_mapping_and_exclude_cancelled():
+    first=order()
+    first['order_items'][0]['item'].update(title='Guantes',variation_id=10,
+        variation_attributes=[{'name':'Color','value_name':'Negro'},{'name':'Talle','value_name':'M'}])
+    second=order(2);second['order_items'][0]['item'].update(id='MLA2',title='Guantes NF',variation_id=20)
+    cancelled=order(3);cancelled['status']='cancelled'
+    p=policy();p['orders'].update({
+        '2':{'refund':'0','logistics':'0','tax_adjustment':'0','source':'liquidacion'},
+        '3':{'fee':'0','cogs':'0','logistics':'0','tax_adjustment':'0','source':'liquidacion'}})
+    p['products']={'MLA1:10':{'name':'Guantes genéricos','variant':'Negro · M'},
+                   'MLA2:20':{'name':'Guantes NF','variant':'Negro · M'}}
+    result=summarize([first,second,cancelled],p,DAY)
+    assert [(x['product'],x['units']) for x in result['sold_products']]==[
+        ('Guantes genéricos',2),('Guantes NF',2)]
+    assert result['sold_units']==4 and result['merchandise_cost']=='120.00'
+
+def test_missing_product_cost_never_returns_partial_total():
+    p=policy();p['costs']=[]
+    result=summarize([order()],p,DAY)
+    variant=result['sold_products'][0]['variants'][0]
+    assert variant['unit_cost'] is None and variant['total_cost'] is None
+    assert result['sold_products'][0]['total_cost'] is None
+    assert result['merchandise_cost'] is None
+
+def test_publications_unify_only_through_verified_product_map():
+    one=order();one['order_items'][0]['item'].update(title='Producto',variation_id=1)
+    two=order(2);two['order_items'][0]['item'].update(id='MLA2',title='Producto',variation_id=2)
+    p=policy();p['orders']['2']={'refund':'0','logistics':'0','tax_adjustment':'0','source':'liquidacion'}
+    separate=summarize([one,two],p,DAY)
+    assert len(separate['sold_products'])==2
+    p['products']={'MLA1:1':{'name':'Producto verificado','variant':'Rojo · M'},
+                   'MLA2:2':{'name':'Producto verificado','variant':'Rojo · M'}}
+    unified=summarize([one,two],p,DAY)
+    assert len(unified['sold_products'])==1
+    assert unified['sold_products'][0]['variants'][0]['units']==4
 
 def test_cancellation_preserves_expenses():
     o=order();o['status']='cancelled';p=policy();p['orders']['1'].update(fee='4',cogs='0')
@@ -174,6 +214,10 @@ def test_routes_require_private_session(tmp_path):
         assert c.get('/monitor/data').status_code==401
         assert c.get('/monitor').status_code==200
         assert c.get('/monitor/assets/monitor.js').status_code==200
+        logo=c.get('/monitor/assets/northfitness-logo.jpg')
+        assert logo.status_code==200 and logo.headers['content-type']=='image/jpeg'
+        assert hashlib.sha256(logo.content).hexdigest()=='52c0a5f2db09d9d36881ff8ba3f8a9f3f7f461e9eaa78bd1b74b36b027b786d6'
+        assert "img-src 'self'" in logo.headers['content-security-policy']
         assert c.post('/monitor/session',json={'token':'bad'}).status_code==403
         assert c.post('/monitor/session',json={'token':'bad'},headers={'Origin':'https://nf.example'}).status_code==401
     assert app.state.nf_http_client.is_closed

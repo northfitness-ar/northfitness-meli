@@ -56,6 +56,9 @@ Se reemplaza la configuración completa, con control de versión e historial: le
   con una base consistente con el ajuste impositivo. ISO con zona para la vigencia.
 - `kits`: objeto con clave `item_id:variation_id` (variante ausente: `MLA123:`), valor
   lista `{sku, quantity}`. No se calcula con márgenes comerciales históricos fijos.
+- `products`: mapeo explícito por `item_id:variation_id` a `{name, variant}`. Sólo este mapeo
+  permite unificar publicaciones bajo un producto y variante; nunca se infiere por títulos parecidos.
+  Los kits permanecen separados aunque compartan nombre y su costo suma los componentes de `kits`.
 - `orders`: objeto por ID de orden **como texto**, con `source` y campos conciliados:
   - `refund`: importe reintegrado de una venta pagada; cero solamente si fue verificado.
   - `fee`: comisión neta **total de la orden**, sustituye `sale_fee × quantity`.

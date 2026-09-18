@@ -1,5 +1,6 @@
 """Private read-only dashboard on the existing server. No credentials in URLs."""
 import asyncio
+import base64
 import contextlib
 import hashlib
 import json
@@ -16,7 +17,7 @@ from profitability import summarize, validate_policy, amount
 TZ = ZoneInfo('America/Argentina/Buenos_Aires')
 HEADERS = {'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer',
            'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY',
-           'Content-Security-Policy': "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'"}
+           'Content-Security-Policy': "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'"}
 
 
 class Monitor:
@@ -183,7 +184,8 @@ def register(mcp, api, auto, seller, data, env):
     def nf_monitor_configurar(datos_json: str, expected_revision: int) -> dict:
         """Guarda configuración explícita del titular: currency ARS, costs [{sku,unit_cost,effective_from,source}],
         kits {item_id:variation_id: [{sku,quantity}]}, orders {id:{refund,fee,cogs,logistics,tax_adjustment,source}},
-        days {YYYY-MM-DD:{ads,fixed_costs,source}}. Importes conciliados: jamás completar desconocidos con cero.
+        products {item_id:variation_id:{name,variant}}, days {YYYY-MM-DD:{ads,fixed_costs,source}}.
+        Importes conciliados: jamás completar desconocidos con cero.
         Leer nf_monitor_configuracion antes. Tax_adjustment es ajuste firmado sobre base de caja, no retenciones automáticas.
         """
         api()
@@ -215,9 +217,17 @@ def register(mcp, api, auto, seller, data, env):
     async def asset(request):
         from starlette.responses import Response
         name = request.path_params['name']
-        if name not in ('monitor.js', 'monitor.css'):
+        if name not in ('monitor.js', 'monitor.css', 'northfitness-logo.jpg'):
             return Response(status_code=404)
-        return Response((Path(__file__).parent / name).read_text(), headers=HEADERS,
+        path = Path(__file__).parent / name
+        if name.endswith('.jpg'):
+            encoded = (Path(__file__).parent / 'northfitness-logo.b64').read_bytes()
+            try:
+                content = base64.b64decode(b''.join(encoded.split()), validate=True)
+            except ValueError:
+                return Response(status_code=500, headers=HEADERS)
+            return Response(content, headers=HEADERS, media_type='image/jpeg')
+        return Response(path.read_text(), headers=HEADERS,
                         media_type='text/javascript' if name.endswith('.js') else 'text/css')
 
     @mcp.custom_route('/monitor/session', methods=['POST'])
