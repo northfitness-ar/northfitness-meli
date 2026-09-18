@@ -258,7 +258,8 @@ class PictureChanges(TitleChanges):
                 result['state'] = 'unknown'
         return self.finish(operation_id, result)
 
-    async def gallery(self, client, seller, item_id, picture_ids, snapshot_hash, operation_id):
+    async def gallery(self, client, seller, item_id, picture_ids, snapshot_hash, operation_id,
+                      remove_picture_ids=None):
         _valid_item_id(item_id)
         _valid_operation_id(operation_id)
         if (not isinstance(picture_ids, list) or not 1 <= len(picture_ids) <= 30 or
@@ -266,6 +267,14 @@ class PictureChanges(TitleChanges):
             len(set(picture_ids)) != len(picture_ids)):
             raise ToolError('Lista ordenada de 1 a 30 IDs distintos.')
         request = json.dumps(['gallery', str(seller), item_id, picture_ids, snapshot_hash])
+        if remove_picture_ids is not None:
+            if (not isinstance(remove_picture_ids, list) or not remove_picture_ids or
+                any(not isinstance(p, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,120}', p)
+                    for p in remove_picture_ids) or
+                len(set(remove_picture_ids)) != len(remove_picture_ids)):
+                raise ToolError('Indicar los IDs distintos de las fotos que se reemplazan.')
+            request = json.dumps(['gallery_replace', str(seller), item_id, picture_ids,
+                                  snapshot_hash, sorted(remove_picture_ids)])
         previous = self.previous(operation_id, request)
         if previous is not None:
             return previous
@@ -273,7 +282,16 @@ class PictureChanges(TitleChanges):
         if fingerprint(before) != snapshot_hash:
             raise ToolError('La publicación cambió: consultar nuevamente.')
         old_ids = [p['id'] for p in before.get('pictures', [])]
-        if not set(old_ids).issubset(picture_ids):
+        removed = set(old_ids) - set(picture_ids)
+        if remove_picture_ids is not None:
+            if removed != set(remove_picture_ids):
+                raise ToolError('Las fotos retiradas deben coincidir exactamente con remove_picture_ids.')
+            if len(set(picture_ids) - set(old_ids)) != len(removed):
+                raise ToolError('Cada foto retirada debe reemplazarse por una nueva.')
+            linked = {p for v in before.get('variations', []) for p in v.get('picture_ids', [])}
+            if removed & linked:
+                raise ToolError('No se pueden retirar fotos asociadas a variantes con esta acción.')
+        elif removed:
             raise ToolError('Esta acción conserva todas las fotos actuales; no permite eliminarlas.')
         with sqlite3.connect(self.path) as connection:
             staged = [json.loads(row[0]) for row in connection.execute('SELECT result FROM title_changes')]
@@ -288,6 +306,8 @@ class PictureChanges(TitleChanges):
             raise ToolError('Límite de fotos de categoría desconocido o excedido.')
         base = dict(operation_id=operation_id, item_id=item_id, kind='gallery',
                     before=old_ids, requested=picture_ids)
+        if remove_picture_ids is not None:
+            base.update(kind='gallery_replace', removed=sorted(removed))
         previous = self.reserve(operation_id, request, str(seller) + ':' + item_id, base)
         if previous is not None:
             return previous
@@ -326,10 +346,12 @@ def register(mcp, api, seller, data):
 
     @mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": True})
     async def nf_fotos_consultar(item_id: str) -> dict:
-        """Lee galería ordenada y snapshot de una publicación NF antes de agregar fotos."""
+        """Lee galería, asociaciones de variantes y snapshot antes de agregar o reemplazar fotos."""
         item = await snapshot(api(), seller, item_id)
         return dict(item_id=item_id, title=item['title'], pictures=item.get('pictures', []),
-                    video_id=item.get('video_id'), snapshot_hash=fingerprint(item))
+                    video_id=item.get('video_id'), snapshot_hash=fingerprint(item),
+                    variation_pictures={str(v['id']): v.get('picture_ids', [])
+                                        for v in item.get('variations', [])})
 
     @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False,
                           "idempotentHint": True, "openWorldHint": True})
@@ -352,6 +374,23 @@ def register(mcp, api, seller, data):
         nunca reenviar con otro ID. 401/403: detenerse y revisar permisos.
         """
         return await pictures.gallery(api(), seller, item_id, picture_ids, snapshot_hash, operation_id)
+
+    @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": True,
+                          "idempotentHint": True, "openWorldHint": True})
+    async def nf_fotos_reemplazar(item_id: str, picture_ids: list[str],
+                                 remove_picture_ids: list[str], snapshot_hash: str,
+                                 operation_id: str) -> dict:
+        """Reemplaza fotos solo por orden explícita del titular para esa publicación.
+        Leer nf_fotos_consultar y cargar nuevas imágenes con nf_foto_cargar.
+        picture_ids es la galería final ordenada, primer ID portada; conservar todos
+        los IDs actuales excepto exactamente remove_picture_ids. Un reemplazo por
+        cada foto retirada. Rechaza retirar fotos asociadas a variantes.
+        No cambia precio, stock, título, video, promociones ni Ads.
+        Solo verified confirma el cambio; unknown/verification_mismatch exige
+        conciliar, nunca reenviar con otro operation_id. 401/403: revisar permisos.
+        """
+        return await pictures.gallery(api(), seller, item_id, picture_ids, snapshot_hash,
+                                      operation_id, remove_picture_ids=remove_picture_ids)
 
     @mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": True})
     async def nf_titulo_consultar(item_id: str) -> dict:

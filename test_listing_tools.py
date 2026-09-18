@@ -150,3 +150,81 @@ def test_uncertain_upload_blocks_duplicate_operation():
         except ToolError:
             pass
         assert len(client.calls) == 1
+
+
+def staged_replacement(directory, original=None, status=200):
+    original = original or item()
+    client = PictureClient(original, status)
+    changes = PictureChanges(Path(directory) / 'changes.sqlite3')
+    encoded = base64.b64encode(b'\x89PNG\r\n\x1a\nfixture').decode()
+    run(changes.upload(client, '123', original['id'], encoded, 'replace-upload-001'))
+    return client, changes
+
+
+def test_replace_exact_photo_preserves_rest_and_is_idempotent():
+    with tempfile.TemporaryDirectory() as directory:
+        original = item()
+        original['pictures'].append({'id': 'KEEP'})
+        original['video_id'] = 'video'
+        client, changes = staged_replacement(directory, original)
+        args = (client, '123', original['id'], ['NEW-PIC', 'KEEP'],
+                fingerprint(original), 'replace-gallery-001')
+        result = run(changes.gallery(*args, remove_picture_ids=['PIC1']))
+        assert result['state'] == 'verified'
+        assert result['before'] == ['PIC1', 'KEEP']
+        assert result['removed'] == ['PIC1']
+        assert result['other_settings_preserved'] is True
+        assert run(changes.gallery(*args, remove_picture_ids=['PIC1'])) == result
+        assert len(client.calls) == 2
+        assert client.calls[-1][2]['json'] == {'pictures': [{'id': 'NEW-PIC'}, {'id': 'KEEP'}]}
+
+
+def test_replace_rejects_undeclared_deletions_foreign_photos_and_stale_reads():
+    cases = [(['NEW-PIC'], ['OTHER'], None),
+             (['NEW-PIC'], ['PIC1', 'PIC1'], None),
+             (['FOREIGN'], ['PIC1'], None),
+             (['NEW-PIC', 'PIC1'], ['PIC1'], None),
+             (['NEW-PIC'], ['PIC1'], '0' * 64),
+             (['NEW-PIC'], [], None)]
+    for ids, removed, snap in cases:
+        with tempfile.TemporaryDirectory() as directory:
+            client, changes = staged_replacement(directory)
+            try:
+                run(changes.gallery(client, '123', item()['id'], ids,
+                                    snap or fingerprint(item()), 'replace-invalid-001',
+                                    remove_picture_ids=removed))
+                raise AssertionError('Must fail closed')
+            except ToolError:
+                pass
+            assert len(client.calls) == 1  # Only the staging upload.
+
+
+def test_replace_blocks_variant_linked_photo():
+    with tempfile.TemporaryDirectory() as directory:
+        original = item()
+        original['variations'] = [{'id': 1, 'picture_ids': ['PIC1']}]
+        client, changes = staged_replacement(directory, original)
+        try:
+            run(changes.gallery(client, '123', original['id'], ['NEW-PIC'],
+                                fingerprint(original), 'replace-linked-001',
+                                remove_picture_ids=['PIC1']))
+            raise AssertionError('Must fail closed')
+        except ToolError:
+            pass
+        assert len(client.calls) == 1
+
+
+def test_uncertain_replacement_keeps_lock_and_never_resends():
+    with tempfile.TemporaryDirectory() as directory:
+        client, changes = staged_replacement(directory)
+        client.status = 500
+        args = (client, '123', item()['id'], ['NEW-PIC'], fingerprint(item()), 'replace-unknown-001')
+        first = run(changes.gallery(*args, remove_picture_ids=['PIC1']))
+        assert first['state'] == 'unknown'
+        assert run(changes.gallery(*args, remove_picture_ids=['PIC1'])) == first
+        try:
+            run(changes.gallery(*args[:-1], 'replace-unknown-002', remove_picture_ids=['PIC1']))
+            raise AssertionError('Must block duplicate write')
+        except ToolError:
+            pass
+        assert len(client.calls) == 2
