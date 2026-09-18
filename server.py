@@ -948,6 +948,9 @@ def build_app(env=None):
     from mercadopago_reports import register as register_mp
     register_mp(mcp, api, seller)
 
+    from financial_reads import register as register_financial_reads
+    register_financial_reads(mcp, api, seller)
+
     from price_tools import register as register_prices
     register_prices(mcp, api, seller, data)
 
@@ -970,6 +973,7 @@ def build_app(env=None):
         return JSONResponse({'service': 'northfitness-meli', 'configured': True,
                              'live_account_verified': False, 'mode': 'support-auto-mp-v0.10',
                              'mp_configured': bool(os.environ.get('MP_ACCESS_TOKEN', '').strip()),
+                             'financial_reads_version': '1',
                              'automatic_replies_enabled': auto.enabled(),
                              'claims_money_actions_enabled': auto.claims.enabled(),
                              'runtime': diagnostics.snapshot()})

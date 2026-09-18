@@ -1,5 +1,42 @@
 # Diagnóstico de memoria
 
+## Consultas financieras por operación
+
+`nf_ventas` agrega `payments` (proyección financiera sin datos del comprador) y
+`last_updated`, sin sumar pagos compartidos ni cambiar el criterio de fecha.
+
+`nf_cargos_consultar(order_ids)` verifica la titularidad de 1–20 órdenes y consulta
+`GET /billing/integration/group/ML/order/details?order_ids=...&seller_id=...`.
+Devuelve evidencia filtrada, identificadores y hash; todavía no clasifica ni suma
+automáticamente conceptos. La forma real del desglose debe validarse con la cuenta.
+La API de facturación puede tener demora, bonificaciones y cargos compartidos:
+`complete=false` y totales `null` son intencionales, incluso ante respuesta vacía.
+Fuente: https://global-selling.mercadolibre.com/devsite/en_us/create-application/billing-reports-by-orders-and-packs
+
+`nf_venta_conciliar(order_id)` verifica orden y cuenta MP, consulta los pagos de esa
+orden con `GET /v1/payments/{id}` y sus reembolsos con `GET /v1/payments/{id}/refunds`.
+Requiere el mismo `MP_ACCESS_TOKEN` que los reportes. No genera ni devuelve dinero.
+No devuelve datos de comprador, tarjeta ni credenciales. Sin permiso o con evidencia
+inconsistente, falla explícitamente; nunca convierte errores en importes cero.
+
+Controles contables para quien consuma estas lecturas:
+
+- Deduplicar por payment_id, charge_id y refund id, también entre órdenes del mismo pack.
+- No sumar `sale_fee`, `fee_details`, `charges_details`, FEE_AMOUNT y MKP_FEE_AMOUNT:
+  son representaciones potencialmente superpuestas del mismo cargo.
+- No sumar `transaction_amount_refunded` con la lista de refunds.
+- Conservar cargo original y monto reintegrado por separado; no presumir bonificación
+  total por estado cancelled, ni que mercadería/costo se hayan recuperado.
+- Fijo/variable sólo con concepto histórico explícito y reconciliado. Sin evidencia,
+  dejar Pendiente; no aplicar retrospectivamente tarifas actuales o porcentajes fijos.
+- Estas herramientas no escriben la planilla ni reemplazan sus conciliaciones previas.
+
+Despliegue: `GET /healthz` incorpora `financial_reads_version: "1"`. Esto confirma la
+versión publicada, no permisos de facturación ni conciliación financiera. Verificar
+las nuevas herramientas con una venta pagada y una cancelada antes de cerrar pendientes.
+Si el catálogo MCP conserva el esquema anterior, actualizar la conexión en el cliente.
+El acceso sigue sujeto a OAuth/permisos de MELI y a la vigencia del token MP existente.
+
 `GET /healthz` expone un bloque `runtime` sin credenciales, URLs, payloads ni nombres de tareas:
 
 - RSS actual y variación desde la construcción de la aplicación.

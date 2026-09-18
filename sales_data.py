@@ -47,7 +47,11 @@ async def orders_page(client, seller, desde, hasta, offset=0):
         if not start <= stamp < end:
             excluded += 1
             continue
-        rows.append({k: row.get(k) for k in FIELDS})
+        from financial_reads import payment_summary
+        safe = {k: row.get(k) for k in FIELDS}
+        safe['payments'] = payment_summary(row)
+        safe['last_updated'] = row.get('last_updated')
+        rows.append(safe)
     complete = offset + len(raw) >= total
     return {'desde': desde, 'hasta': hasta, 'orders': rows, 'reported_total': total,
             'complete': complete, 'next_offset': None if complete else offset + 50,
