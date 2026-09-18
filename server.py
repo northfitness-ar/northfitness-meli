@@ -825,6 +825,9 @@ def build_app(env=None):
     from mercadopago_reports import register as register_mp
     register_mp(mcp, api, seller)
 
+    from price_tools import register as register_prices
+    register_prices(mcp, api, seller, data)
+
     from monitor import register as register_monitor, install as install_monitor
     monitor = register_monitor(mcp, api, auto, seller, data, env)
 
