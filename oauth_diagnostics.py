@@ -1,4 +1,4 @@
-"""Read-only OAuth evidence for the authenticated session (FastMCP 3.4.7)."""
+"""Consistent OAuth requests and read-only session evidence (FastMCP 3.4.7)."""
 from fastmcp.server.auth import OAuthProxy
 
 CLAIM = 'nf_oauth_evidence'
@@ -17,6 +17,16 @@ def scope_evidence(raw):
 
 
 class DiagnosticOAuthProxy(OAuthProxy):
+    def _prepare_scopes_for_token_exchange(self, scopes):
+        # Consent already requests these configured upstream scopes. FastMCP's
+        # default instead forwards the MCP client's possibly narrower list at
+        # code exchange. Keep both requests consistent; the provider still
+        # decides what to grant. Existing tokens and refresh are unchanged.
+        configured = self._extra_authorize_params.get('scope')
+        if isinstance(configured, str) and configured.strip():
+            return configured.split()
+        return super()._prepare_scopes_for_token_exchange(scopes)
+
     async def load_access_token(self, token):
         validated = await super().load_access_token(token)
         if validated is None:
@@ -34,4 +44,5 @@ class DiagnosticOAuthProxy(OAuthProxy):
         except Exception:
             # Diagnostics must neither disclose exceptions nor break authentication.
             pass
+        evidence['authorization_flow_version'] = 2
         return validated.model_copy(update={'claims': {**(validated.claims or {}), CLAIM: evidence}})

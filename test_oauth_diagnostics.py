@@ -7,6 +7,21 @@ from fastmcp.server.auth import OAuthProxy, AccessToken
 from oauth_diagnostics import DiagnosticOAuthProxy, scope_evidence, CLAIM
 
 
+def test_exchange_uses_same_scopes_as_upstream_consent():
+    proxy = object.__new__(DiagnosticOAuthProxy)
+    proxy._extra_authorize_params = {'scope': 'read write offline_access'}
+    assert proxy._prepare_scopes_for_token_exchange(['read']) == ['read', 'write', 'offline_access']
+    # A broader request must never be confused with an actual grant.
+    assert scope_evidence({'scope': 'read offline_access'})['write_granted'] is False
+
+
+@pytest.mark.parametrize('configured', [{}, {'scope': ''}, {'scope': 'read'}])
+def test_exchange_does_not_invent_write_permission(configured):
+    proxy = object.__new__(DiagnosticOAuthProxy)
+    proxy._extra_authorize_params = configured
+    assert proxy._prepare_scopes_for_token_exchange(['read']) == ['read']
+
+
 @pytest.mark.parametrize('raw', [{}, None, {'scope': None}, {'scope': ['write']}])
 def test_missing_provider_scope_is_unknown(raw):
     assert scope_evidence(raw)['available'] is False
