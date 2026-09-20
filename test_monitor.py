@@ -156,6 +156,27 @@ def test_stale_cache_on_failure(tmp_path):
     with m.db() as c:c.execute('INSERT INTO snapshots VALUES(?,?,?)',(day,json.dumps({'policy_revision':0,'net_estimate':'100','fetched_at':'old'}),time.time()-400))
     assert asyncio.run(m.snapshot(day))['stale'] is True
 
+def test_snapshot_recalculates_old_schema_and_matches_period_logistics(tmp_path, monkeypatch):
+    import json, time
+    class Auto:
+        async def client(self): return object()
+    async def read(*args): return [order()], 0
+    async def shipping(self, client, rows, configured):
+        enriched = copy.deepcopy(configured)
+        enriched['orders']['1']['logistics'] = '19.00'
+        return enriched
+    monkeypatch.setattr('monitor.all_orders', read)
+    monkeypatch.setattr(Monitor, 'shipping_policy', shipping)
+    m = Monitor(tmp_path, Auto(), '237699011', 'https://nf.example')
+    m.configure(management_policy(), 0)
+    with m.db() as c:
+        c.execute('INSERT INTO snapshots VALUES(?,?,?)', (DAY, json.dumps({'policy_revision': 1, 'fetched_at': 'old'}), time.time()))
+    daily = asyncio.run(m.snapshot(DAY))
+    period = asyncio.run(m.period(DAY))
+    assert daily['calculation_version'] == 2
+    assert daily['orders'][0]['logistics'] == '19.00'
+    assert daily['management_estimate']['result'] == period['management_estimate']['result']
+
 def test_forced_snapshot_fetches_new_data_on_every_call(tmp_path, monkeypatch):
     """The web refresh path must never reuse the five-minute background cache."""
     calls = []
@@ -201,7 +222,10 @@ def test_closed_day_uses_only_ads_saved_for_requested_date():
     assert still_open['ads_included'] is False
     assert still_open['result'] == '115.18'
 
-def test_routes_require_private_session(tmp_path):
+def test_routes_require_private_session(tmp_path, monkeypatch):
+    # In-process ASGI tests do not use the execution environment proxy.
+    for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        monkeypatch.delenv(key, raising=False)
     from server import build_app
     from cryptography.fernet import Fernet
     from starlette.testclient import TestClient
@@ -221,3 +245,102 @@ def test_routes_require_private_session(tmp_path):
         assert c.post('/monitor/session',json={'token':'bad'}).status_code==403
         assert c.post('/monitor/session',json={'token':'bad'},headers={'Origin':'https://nf.example'}).status_code==401
     assert app.state.nf_http_client.is_closed
+
+
+def management_policy():
+    p=policy()
+    p['management_estimate']={'effective_from':'2026-09-01','source':'titular','refunds':'exclude','ads':'closed_day','check_tax_rate':'.006','iibb_rate':'.02'}
+    return p
+
+def test_net_tax_base_excludes_cancelled():
+    p=management_policy();cancelled=order(2);cancelled['status']='cancelled'
+    r=summarize([order(),cancelled],p,DAY)
+    assert r['management_estimate']['tax_base']=='200.20'
+    assert r['management_estimate']['check_tax']=='1.20'
+    assert r['management_estimate']['iibb']=='4.00'
+    assert r['sold_units']==2
+
+def test_period_cost_dates_weighted_and_fixed_ads():
+    from profitability import summarize_period
+    p=management_policy();p['products']={'MLA1:':{'name':'NF','variant':'Negro'}}
+    p['fixed_cost_schedule']=[{'effective_from':'2026-09-01','daily_cost':'100','source':'titular'}, {'effective_from':'2026-10-01','daily_cost':'40','source':'titular'}]
+    p['costs'].append({'sku':'S','unit_cost':'50','effective_from':'2026-09-18T00:00:00-03:00','source':'cambio'})
+    start=datetime(2026,9,17,tzinfo=TZ);end=start+timedelta(days=2)
+    r=summarize_period([order(),order(2,'2026-09-18T10:00:00-03:00')],p,start,end)
+    assert r['merchandise_cost']=='160.00'
+    assert r['sold_products'][0]['variants'][0]['unit_cost']=='40.00'
+    assert r['fixed_costs']=='102.00'  # explicit daily override preserved
+    assert r['ads']=='10.00' and r['ads_missing_days']==1
+    r=summarize_period([],p,datetime(2026,10,1,tzinfo=TZ),datetime(2026,10,3,tzinfo=TZ))
+    assert r['fixed_costs']=='80.00'
+
+def test_period_missing_cost_not_partial_and_original_cancel_day():
+    from profitability import summarize_period
+    p=management_policy();old=order(2,'2026-09-16T10:00:00-03:00');old['status']='cancelled'
+    start=datetime(2026,9,17,tzinfo=TZ)
+    r=summarize_period([order(),old],p,start,start+timedelta(days=1))
+    assert r['cancelled']=='0.00' and r['sold_units']==2
+    unknown=order(3);unknown['order_items'][0]['item']['seller_sku']='UNKNOWN'
+    r=summarize_period([order(),unknown],p,start,start+timedelta(days=1))
+    assert r['merchandise_cost'] is None and r['management_estimate']['result'] is None
+
+def test_period_monday_bounds_comparison_and_failed_refresh(tmp_path,monkeypatch):
+    calls=[]
+    class Auto:
+        async def client(self): return object()
+    async def read(client,seller,start,end):
+        calls.append((start,end));return [],0
+    monkeypatch.setattr('monitor.all_orders',read)
+    m=Monitor(tmp_path,Auto(),'237699011','https://nf.example');m.configure(management_policy(),0)
+    result=asyncio.run(m.period(DAY,'week'))
+    assert calls[0][0].startswith('2026-09-14T00:00:00-03:00')
+    assert calls[1][0].startswith('2026-09-07T00:00:00-03:00')
+    assert datetime.fromisoformat(calls[0][1])-datetime.fromisoformat(calls[1][1])==timedelta(days=7)
+    async def fail(*args):raise RuntimeError('offline')
+    monkeypatch.setattr('monitor.all_orders',fail)
+    stale=asyncio.run(m.period(DAY,'week'))
+    assert stale['stale'] and stale['fetched_at']==result['fetched_at']
+
+def test_shipping_pack_cost_once_cached_and_unknown_not_zero(tmp_path):
+    class Client:
+        def __init__(self):self.calls=0
+        async def get(self,path):
+            self.calls+=1
+            return {'senders':[{'user_id':237699011,'cost':'9.99'}]} if path.endswith('/costs') else [{'order_id':1},{'order_id':2}]
+    m=Monitor(tmp_path,None,'237699011','https://nf.example');client=Client()
+    rows=[order(),order(2)]
+    for o in rows:o['shipping']={'id':123}
+    p=policy();p['orders']={}
+    enriched=asyncio.run(m.shipping_policy(client,rows,p))
+    assert sum(amount(x['logistics']) for x in enriched['orders'].values())==amount('9.99')
+    assert p['orders']=={}
+    asyncio.run(m.shipping_policy(client,rows,p));assert client.calls==2
+    # A pack containing orders outside the selected range is not fully charged to one order.
+    (tmp_path/'other').mkdir()
+    m2=Monitor(tmp_path/'other',None,'237699011','https://nf.example')
+    partial=asyncio.run(m2.shipping_policy(client,rows[:1],p))
+    assert 'logistics' not in partial['orders'].get('1', {})
+
+def test_month_calendar_boundaries_and_identical_duration(tmp_path,monkeypatch):
+    calls=[]
+    class Auto:
+        async def client(self):return object()
+    async def read(client,seller,start,end):calls.append((start,end));return [],0
+    monkeypatch.setattr('monitor.all_orders',read)
+    m=Monitor(tmp_path,Auto(),'237699011','https://nf.example');m.configure(management_policy(),0)
+    asyncio.run(m.period('2026-08-15','month'))
+    assert calls[0]==('2026-08-01T00:00:00-03:00','2026-09-01T00:00:00-03:00')
+    assert datetime.fromisoformat(calls[0][0])-datetime.fromisoformat(calls[1][0])==timedelta(days=28)
+    assert datetime.fromisoformat(calls[0][1])-datetime.fromisoformat(calls[1][1])==timedelta(days=28)
+
+def test_html_controls_have_script_targets():
+    from html.parser import HTMLParser
+    from pathlib import Path
+    import re
+    class IDs(HTMLParser):
+        def __init__(self):super().__init__();self.ids=[]
+        def handle_starttag(self,tag,attrs):
+            self.ids.extend(v for k,v in attrs if k=='id')
+    parser=IDs();parser.feed(Path('monitor.html').read_text())
+    assert len(parser.ids)==len(set(parser.ids))
+    assert set(re.findall(r"\$\('([^']+)'\)",Path('monitor.js').read_text()))<=set(parser.ids)
