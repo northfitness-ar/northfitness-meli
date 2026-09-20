@@ -1,9 +1,10 @@
 # Monitor de rentabilidad NorthFitness
 
 Implementación sobre el servidor existente. No requiere publicar los datos ni contratar otro hosting.
-El panel se sirve en `/monitor`; el acceso se genera desde ChatGPT con `nf_monitor_abrir`.
-El enlace lleva una credencial de un uso en el fragmento (no enviada en la URL HTTP), vence a los
-5 minutos y crea una cookie privada de 8 horas. No compartirlo. La ruta HTML no contiene ventas.
+El panel se sirve en `/monitor`; el acceso se obtiene desde ChatGPT con `nf_monitor_abrir`.
+El enlace privado es permanente y reutilizable. Lleva una credencial derivada del secreto de firma
+en el fragmento (no enviada en la URL HTTP) y crea una cookie privada de 8 horas en cada apertura.
+No compartirlo. La ruta HTML no contiene ventas. Rotar `JWT_SIGNING_KEY` revoca el enlace.
 
 ## Estado y alcance
 
@@ -40,9 +41,9 @@ La clasificación del ajuste impositivo debe validarse con el responsable de la 
 6. Leer `nf_monitor_configuracion`, cargar configuración completa mediante `nf_monitor_configurar`
    con `expected_revision` devuelto. No completar desconocidos con cero.
 7. Ejecutar `nf_monitor_resumen` para un día y verificar contra órdenes y liquidación de ML/MP.
-8. Ejecutar `nf_monitor_abrir` y abrir el enlace personalmente. Guardar el acceso base al monitor
-   en el proyecto NorthFitness; la carpeta no ejecuta el servicio. Tras vencer la sesión,
-   pedir un nuevo acceso. No guardar enlaces temporales como acceso permanente.
+8. Ejecutar `nf_monitor_abrir` una vez, guardar el enlace privado como favorito y abrir siempre ese
+   mismo acceso. Si vence la cookie, el enlace vuelve a autorizar el navegador. La carpeta del
+   proyecto no ejecuta el servicio. Rotar el secreto de firma invalida el enlace anterior.
 
 La carga externa de Ads se ejecuta a las 07:00 de Argentina. El monitor no agrega otro scheduler
 para esa carga: consume el importe fechado que ya se haya guardado en la configuración.
