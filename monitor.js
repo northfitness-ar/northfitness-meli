@@ -6,14 +6,16 @@ const stamp=value=>{try{return new Intl.DateTimeFormat('es-AR',{timeZone:'Americ
 $('day').value=new Intl.DateTimeFormat('en-CA',{timeZone:'America/Argentina/Buenos_Aires',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
 let busy=false, allOrders=[], pageIndex=0, lastSuccess=0, timer=null;
 function cell(row,value,tag='td'){const el=document.createElement(tag);el.textContent=value;row.append(el);}
+const percent=value=>value===null||value===undefined?'Pendiente':Number(value).toLocaleString('es-AR',{maximumFractionDigits:2})+'%';
+function profitCells(row,data){cell(row,percent(data.margin_percent));cell(row,fmt(data.unit_profit));cell(row,fmt(data.profit));}
 function drawProducts(d){
  $('rows').replaceChildren();
  for(const product of d.sold_products||[]){
   for(const variant of product.variants){const row=document.createElement('tr');cell(row,product.product);cell(row,variant.variant);
-   if(variant.components?.length){const detail=document.createElement('details'),summary=document.createElement('summary');summary.textContent='Componentes';detail.append(summary);for(const part of variant.components){const line=document.createElement('div');line.textContent=part.quantity+' × '+part.sku+' · '+fmt(part.unit_cost);detail.append(line);}row.children[0].append(detail);}cell(row,String(variant.units));cell(row,fmt(variant.unit_cost));cell(row,fmt(variant.total_cost));$('rows').append(row);}
-  const total=document.createElement('tr');total.className='product-total';cell(total,'TOTAL '+product.product,'th');cell(total,'','td');cell(total,String(product.units));cell(total,'');cell(total,fmt(product.total_cost));$('rows').append(total);
+   if(variant.components?.length){const detail=document.createElement('details'),summary=document.createElement('summary');summary.textContent='Componentes';detail.append(summary);for(const part of variant.components){const line=document.createElement('div');line.textContent=part.quantity+' × '+part.sku+' · '+fmt(part.unit_cost);detail.append(line);}row.children[0].append(detail);}cell(row,String(variant.units));cell(row,fmt(variant.unit_cost));cell(row,fmt(variant.total_cost));profitCells(row,variant);$('rows').append(row);}
+  const total=document.createElement('tr');total.className='product-total';cell(total,'TOTAL '+product.product,'th');cell(total,'','td');cell(total,String(product.units));cell(total,'');cell(total,fmt(product.total_cost));profitCells(total,product);$('rows').append(total);
  }
- if(!(d.sold_products||[]).length){const row=document.createElement('tr');const empty=document.createElement('td');empty.colSpan=5;empty.textContent='Sin ventas pagadas para esta fecha.';row.append(empty);$('rows').append(row);}
+ if(!(d.sold_products||[]).length){const row=document.createElement('tr');const empty=document.createElement('td');empty.colSpan=8;empty.textContent='Sin ventas pagadas para esta fecha.';row.append(empty);$('rows').append(row);}
  $('totalunits').textContent=String(d.sold_units??0);$('totalmerchandise').textContent=fmt(d.merchandise_cost);
 }
 function drawOrders(){
