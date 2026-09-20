@@ -54,7 +54,7 @@ async function update(){
  finally{busy=false;$('refresh').disabled=false;timer=setTimeout(update,(selectedDay!==$('day').value||selectedPeriod!==$('period').value)?0:Math.max(0,30000-(Date.now()-startedAt)));}
 }
 async function init(){
- const token=location.hash.slice(1);history.replaceState(null,'',location.pathname);
+ const token=location.hash.slice(1);
  if(token){try{const r=await fetch('/monitor/session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token})});const d=await r.json();if(!r.ok)throw new Error(d.error);}catch(e){$('state').className='error';$('state').textContent=e.message;return;}}
  clock();setInterval(clock,1000);await update();
 }
