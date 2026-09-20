@@ -149,6 +149,22 @@ def test_one_use_link_cookie_and_revision(tmp_path):
     with pytest.raises(ValueError):m.configure(policy(),0)
     assert Monitor(tmp_path,None,'237699011','https://nf.example').config()['revision']==1
 
+
+def test_permanent_link_is_stable_and_reusable(tmp_path):
+    secret = 'stable-signing-key'
+    first = Monitor(tmp_path, None, '237699011', 'https://nf.example', secret)
+    link = first.permanent_url()
+    token = link.split('#', 1)[1]
+    first_cookie = first.exchange(token)
+    second_cookie = first.exchange(token)
+    assert first_cookie and second_cookie and first_cookie != second_cookie
+    assert first.authorized(SimpleNamespace(cookies={'nf_monitor': first_cookie}))
+    assert first.authorized(SimpleNamespace(cookies={'nf_monitor': second_cookie}))
+    restarted = Monitor(tmp_path, None, '237699011', 'https://nf.example/', secret)
+    assert restarted.permanent_url() == link
+    assert restarted.exchange(token)
+    assert Monitor(tmp_path, None, '237699011', 'https://nf.example', 'rotated').permanent_url() != link
+
 def test_stale_cache_on_failure(tmp_path):
     import json,time
     m=Monitor(tmp_path,None,'237699011','https://nf.example')
@@ -344,3 +360,4 @@ def test_html_controls_have_script_targets():
     parser=IDs();parser.feed(Path('monitor.html').read_text())
     assert len(parser.ids)==len(set(parser.ids))
     assert set(re.findall(r"\$\('([^']+)'\)",Path('monitor.js').read_text()))<=set(parser.ids)
+    assert 'history.replaceState' not in Path('monitor.js').read_text()
