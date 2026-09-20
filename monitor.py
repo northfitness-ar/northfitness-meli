@@ -4,6 +4,7 @@ import base64
 import contextlib
 import copy
 import hashlib
+import hmac
 import json
 import secrets
 import sqlite3
@@ -22,9 +23,14 @@ HEADERS = {'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer',
 
 
 class Monitor:
-    def __init__(self, data, auto, seller, base_url):
+    def __init__(self, data, auto, seller, base_url, permanent_secret=None):
         self.path = str(data / 'monitor.sqlite3')
         self.auto, self.seller, self.base_url = auto, seller, base_url.rstrip('/')
+        self.permanent_token = None
+        if permanent_secret:
+            digest = hmac.new(str(permanent_secret).encode(),
+                              b'northfitness-monitor-permanent-link-v1', hashlib.sha256).digest()
+            self.permanent_token = base64.urlsafe_b64encode(digest).rstrip(b'=').decode()
         self.lock = asyncio.Lock()
         with self.db() as c:
             c.executescript('''CREATE TABLE IF NOT EXISTS config (id INTEGER PRIMARY KEY, revision INTEGER, body TEXT);
@@ -73,6 +79,8 @@ class Monitor:
     def exchange(self, token):
         if not isinstance(token, str) or len(token) > 200:
             return None
+        if self.permanent_token and secrets.compare_digest(token, self.permanent_token):
+            return self.issue('cookie', 8 * 3600)
         with self.db() as c:
             c.execute('BEGIN IMMEDIATE')
             digest = hashlib.sha256(token.encode()).hexdigest()
@@ -81,6 +89,11 @@ class Monitor:
                 return None
             c.execute('DELETE FROM sessions WHERE hash=?', (digest,))
         return self.issue('cookie', 8 * 3600)
+
+    def permanent_url(self):
+        if not self.permanent_token:
+            raise ValueError('Acceso permanente no configurado.')
+        return self.base_url + '/monitor#' + self.permanent_token
 
     def authorized(self, request):
         token = request.cookies.get('nf_monitor', '')
@@ -297,7 +310,7 @@ class Monitor:
 
 def register(mcp, api, auto, seller, data, env):
     from fastmcp.exceptions import ToolError
-    monitor = Monitor(data, auto, seller, env['BASE_URL'])
+    monitor = Monitor(data, auto, seller, env['BASE_URL'], env.get('JWT_SIGNING_KEY'))
 
     @mcp.tool(annotations={'readOnlyHint': True, 'openWorldHint': False})
     def nf_monitor_configuracion() -> dict:
@@ -321,9 +334,12 @@ def register(mcp, api, auto, seller, data, env):
 
     @mcp.tool(annotations={'readOnlyHint': False, 'destructiveHint': False, 'openWorldHint': False})
     def nf_monitor_abrir() -> dict:
-        """Genera acceso privado de un uso al monitor, válido 5 minutos. Sólo para el titular; no compartir."""
+        """Devuelve el acceso privado permanente al monitor. Sólo para el titular; no compartir."""
         api()
-        return {'url': monitor.base_url + '/monitor#' + monitor.issue('link', 300), 'expires_in_seconds': 300}
+        try:
+            return {'url': monitor.permanent_url(), 'permanent': True, 'expires_in_seconds': None}
+        except ValueError as exc:
+            raise ToolError(str(exc)) from None
 
     @mcp.tool(annotations={'readOnlyHint': True, 'openWorldHint': True})
     async def nf_monitor_resumen(fecha: str) -> dict:
