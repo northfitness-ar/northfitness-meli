@@ -97,7 +97,7 @@ def variant_label(item):
     return ' · '.join(values) or 'Sin variante'
 
 
-def sold_products_add(groups, policy, item, qty, stamp):
+def sold_products_add(groups, policy, item, qty, stamp, line=None, facts=None, single_line=True):
     listing_key = str(item['id']) + ':' + str(item.get('variation_id') or '')
     mapped = policy.get('products', {}).get(listing_key)
     is_kit = listing_key in policy.get('kits', {})
@@ -125,7 +125,8 @@ def sold_products_add(groups, policy, item, qty, stamp):
     variant_key = listing_key if is_kit else variant
     row = group['variants'].setdefault(variant_key, {'variant': variant, 'units': 0,
         'unit_cost': unit if known else None, 'total_cost': ZERO if known else None,
-        'components': components if is_kit else [], 'listing_keys': set()})
+        'components': components if is_kit else [], 'listing_keys': set(),
+        'sales': ZERO, 'profit': ZERO})
     # An explicit product/variant map may unify listings only when their computed unit cost agrees.
     if not known:
         row['unit_cost'] = row['total_cost'] = None
@@ -134,26 +135,61 @@ def sold_products_add(groups, policy, item, qty, stamp):
     if row['total_cost'] is not None:
         row['total_cost'] += unit * qty
         row['unit_cost'] = row['total_cost'] / row['units']
+    facts = facts or {}
+    sale = amount(line['unit_price']) * qty if line else None
+    fee = amount(line['sale_fee']) * qty if line and line.get('sale_fee') is not None else None
+    cost = unit * qty if known else None
+    # Order-level reconciliations cannot be attributed to different lines without evidence.
+    ambiguous = not single_line and any(k in facts for k in ('fee', 'cogs', 'refund'))
+    if single_line:
+        if 'fee' in facts:
+            fee = amount(facts['fee'])
+        if 'cogs' in facts:
+            cost = amount(facts['cogs'])
+        if sale is not None:
+            sale -= amount(facts.get('refund', 0))
+    if amount(facts.get('refund', 0)) > 0 and 'cogs' not in facts:
+        cost = None
+    if sale is None or ambiguous:
+        row['sales'] = None
+    elif row['sales'] is not None:
+        row['sales'] += sale
+    if sale is None or fee is None or cost is None or ambiguous:
+        row['profit'] = None
+    elif row['profit'] is not None:
+        row['profit'] += sale - fee - cost
+
+
+def product_profit_fields(sales, profit, units):
+    return {'sales': money(sales), 'profit': money(profit),
+            'unit_profit': money(profit / units) if profit is not None and units else None,
+            'margin_percent': money(profit * 100 / sales)
+                if profit is not None and sales is not None and sales > 0 else None}
+
 
 
 def sold_products_result(groups):
     products, general_units, general_cost, complete = [], 0, ZERO, True
     for group in groups.values():
         variants, product_units, product_cost, product_complete = [], 0, ZERO, True
+        product_sales, product_profit = ZERO, ZERO
         for row in group['variants'].values():
             product_units += row['units']
             if row['total_cost'] is None:
                 product_complete = False
             else:
                 product_cost += row['total_cost']
-            variants.append({**row, 'unit_cost': money(row['unit_cost']),
+            product_sales = product_sales + row['sales'] if product_sales is not None and row['sales'] is not None else None
+            product_profit = product_profit + row['profit'] if product_profit is not None and row['profit'] is not None else None
+            variants.append({**row, **product_profit_fields(row['sales'], row['profit'], row['units']), 'unit_cost': money(row['unit_cost']),
                 'total_cost': money(row['total_cost']), 'listing_keys': sorted(row['listing_keys'])})
         general_units += product_units
         complete = complete and product_complete
         if product_complete:
             general_cost += product_cost
         products.append({'product': group['product'], 'variants': variants, 'units': product_units,
-                         'total_cost': money(product_cost) if product_complete else None})
+                         'total_cost': money(product_cost) if product_complete else None,
+                         **product_profit_fields(product_sales, product_profit, product_units)})
     return products, general_units, money(general_cost) if complete else None
 
 
@@ -208,7 +244,8 @@ def summarize(orders, policy, day, ads_reported=None):
             listing_key = str(item['id']) + ':' + str(item.get('variation_id') or '')
             parts = policy.get('kits', {}).get(listing_key, [{'sku': sku, 'quantity': 1}])
             if status == 'paid':
-                sold_products_add(product_groups, policy, item, qty, stamp)
+                sold_products_add(product_groups, policy, item, qty, stamp, line,
+                                  policy.get('orders', {}).get(oid, {}), len(lines) == 1)
             for part in parts:
                 cost = unit_cost(policy, part['sku'], stamp)
                 if cost is None:
@@ -357,7 +394,8 @@ def summarize_period(orders, policy, start, end):
         for order in day_orders:
             if order['status'] == 'paid':
                 for line in order['order_items']:
-                    sold_products_add(groups, policy, line['item'], line['quantity'], instant(order['date_created']))
+                    sold_products_add(groups, policy, line['item'], line['quantity'], instant(order['date_created']),
+                                      line, policy.get('orders', {}).get(str(order['id']), {}), len(order['order_items']) == 1)
     products, units, cost = sold_products_result(groups)
     estimates = [r.get('management_estimate', {}) for r in results]
     ads_days = [day for day in days if 'ads' in daily_facts(policy, day)]

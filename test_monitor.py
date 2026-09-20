@@ -361,3 +361,33 @@ def test_html_controls_have_script_targets():
     assert len(parser.ids)==len(set(parser.ids))
     assert set(re.findall(r"\$\('([^']+)'\)",Path('monitor.js').read_text()))<=set(parser.ids)
     assert 'history.replaceState' not in Path('monitor.js').read_text()
+
+
+def test_product_profit_weighted_totals_and_pending():
+    p = policy()
+    p['products'] = {'MLA1:': {'name': 'Producto', 'variant': 'Negro'},
+                     'MLA2:': {'name': 'Producto', 'variant': 'Rojo'}}
+    first, second = order(), order(2)
+    second['order_items'][0]['item']['id'] = 'MLA2'
+    second['order_items'][0]['unit_price'] = '150'
+    r = summarize([first, second], p, DAY)['sold_products'][0]
+    assert r['profit'] == '340.16'
+    assert r['unit_profit'] == '85.04'
+    assert r['margin_percent'] == '68.00'
+    assert r['variants'][0]['profit'] == '120.18'
+    assert r['variants'][1]['profit'] == '219.98'
+    second['order_items'][0]['sale_fee'] = None
+    r = summarize([first, second], p, DAY)['sold_products'][0]
+    assert r['profit'] is None and r['margin_percent'] is None
+    assert r['variants'][0]['profit'] == '120.18'
+
+
+def test_product_profit_period_matches_daily_and_override():
+    from profitability import summarize_period
+    p = policy()
+    p['orders']['1'].update(fee='25', cogs='50')
+    daily = summarize([order()], p, DAY)['sold_products']
+    period = summarize_period([order()], p, datetime(2026, 9, 17, tzinfo=TZ),
+                              datetime(2026, 9, 18, tzinfo=TZ))['sold_products']
+    assert daily == period
+    assert daily[0]['profit'] == '125.20'
