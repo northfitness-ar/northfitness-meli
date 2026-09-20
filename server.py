@@ -164,15 +164,26 @@ async def stock_snapshot(client, seller, item_id, variation_id):
     return item, selected
 
 
+@contextlib.contextmanager
+def sqlite_transaction(path, **kwargs):
+    """Commit/rollback and deterministically release the connection and page cache."""
+    connection = sqlite3.connect(path, **kwargs)
+    try:
+        with connection:
+            yield connection
+    finally:
+        connection.close()
+
+
 class StockChanges:
     def __init__(self, path):
         self.path = str(path)
         self.lock = asyncio.Lock()
-        with sqlite3.connect(self.path) as c:
+        with sqlite_transaction(self.path) as c:
             c.execute('CREATE TABLE IF NOT EXISTS stock_changes (operation_id TEXT PRIMARY KEY, request TEXT, result TEXT)')
 
     def previous(self, operation_id, request):
-        with sqlite3.connect(self.path) as c:
+        with sqlite_transaction(self.path) as c:
             row = c.execute('SELECT request,result FROM stock_changes WHERE operation_id=?', (operation_id,)).fetchone()
         if row:
             if row[0] != request:
@@ -180,7 +191,7 @@ class StockChanges:
             return json.loads(row[1])
 
     def record(self, operation_id, request, result):
-        with sqlite3.connect(self.path) as c:
+        with sqlite_transaction(self.path) as c:
             c.execute('INSERT OR REPLACE INTO stock_changes VALUES (?,?,?)',
                       (operation_id, request, json.dumps(result)))
 
@@ -456,11 +467,11 @@ class SupportWrites:
     """Durable, cross-process one-send-per-incoming-resource ledger. Never stores message text."""
     def __init__(self, path):
         self.path = str(path)
-        with sqlite3.connect(self.path) as c:
+        with sqlite_transaction(self.path) as c:
             c.execute('CREATE TABLE IF NOT EXISTS support_sends (resource TEXT PRIMARY KEY, digest TEXT NOT NULL, result TEXT NOT NULL)')
 
     def reserve(self, resource, digest):
-        with sqlite3.connect(self.path, timeout=15) as c:
+        with sqlite_transaction(self.path, timeout=15) as c:
             c.execute('BEGIN IMMEDIATE')
             row = c.execute('SELECT digest,result FROM support_sends WHERE resource=?', (resource,)).fetchone()
             if row:
@@ -471,7 +482,7 @@ class SupportWrites:
         return None
 
     def finish(self, resource, result):
-        with sqlite3.connect(self.path) as c:
+        with sqlite_transaction(self.path) as c:
             c.execute('UPDATE support_sends SET result=? WHERE resource=?', (json.dumps(result), resource))
         return result
 
@@ -588,7 +599,7 @@ class Notes:
             c.execute('CREATE TABLE IF NOT EXISTS history (key TEXT, body TEXT, version INTEGER, updated_at TEXT)')
 
     def connect(self):
-        return sqlite3.connect(self.path, timeout=15)
+        return sqlite_transaction(self.path, timeout=15)
 
     def read(self, key):
         with self.connect() as c:

@@ -88,3 +88,19 @@ No incluye conversión/visitas, caja de Mercado Pago ni comparativo histórico p
 
 `python -m pytest -q` verifica intervalos, paginación, importes, recuperos, costos históricos,
 kits, campos pendientes, control de revisión, persistencia, cache y acceso privado.
+
+
+## Períodos LIVE y criterios aprobados
+
+- Diario, semana lunes a domingo y mes calendario. Fecha de creación en Argentina; sólo estados pagados/cancelados se totalizan. Una cancelación corrige la fecha original de creación. No se promete igualdad exacta con las estadísticas internas de ML.
+- Impuesto al cheque 0,6% e IIBB 2% sobre ventas menos cancelaciones, calculados y redondeados por día. Resultado antes de IVA; sin embalaje.
+- `fixed_cost_schedule`: reglas `{effective_from: YYYY-MM-DD, daily_cost, source}`. Los gastos explícitos de `days` prevalecen. Configuración autorizada: septiembre 110312/día; desde octubre 47829.71/día, sin monotributo ni CM. Se cobran días completos transcurridos, incluidos días sin ventas; nunca días futuros.
+- Ads usa exclusivamente importes guardados por fecha. La automatización de las 07:00 se conserva. En períodos se descuenta lo cargado y se informa cuántos días faltan.
+- La vista intenta consultar cada 30 segundos, sin solicitudes superpuestas por pestaña; el reloj avanza cada segundo. El servidor serializa y comparte lecturas concurrentes del mismo período. Las consultas históricas vuelven a consultar órdenes; nunca se presentan snapshots fallidos como LIVE.
+- La comparación diaria/semanal se desplaza 7 días; la mensual 28 días, conservando duración, días de semana y hora de corte. La interfaz muestra ambos intervalos exactos. El mes comparativo puede cruzar límites calendario.
+- Productos agrupados exclusivamente por mapeo explícito, kits separados y componentes desplegables. Costos históricos por venta; costo unitario del período es promedio ponderado cuando cambian costos. Un costo faltante mantiene pendientes el subtotal y el total general.
+- Órdenes: búsqueda y paginación local de 50 filas, con fecha, estado, artículos, cantidades, ingresos, comisiones, mercadería y margen.
+- Logística: conciliaciones manuales prevalecen. Se consulta costo del remitente en `/shipments/{id}/costs`, validando vendedor y composición completa con `/shipments/{id}/items`. Packs completos distribuyen costo proporcional a ventas, con ajuste de centavos para conservar el total. Packs incompletos/mixtos, errores y cargos sin importe verificable quedan pendientes. No se infieren importes por `free_shipping`; cargos generales Full no asignados a envíos requieren conciliación aparte.
+- Para limitar carga se consultan hasta 8 envíos por lectura y presupuesto de inicio de 8 segundos, con timeout de 2 segundos por solicitud y caché SQLite de una hora. La interfaz diferencia logística registrada y órdenes pendientes; el resultado estimado sólo descuenta lo registrado. El primer período puede requerir varias actualizaciones para completar envíos. Se conserva el pool HTTP compartido y `/healthz`.
+
+Validación local: pruebas de tasas netas de cancelación, costos por fecha, gastos diarios, Ads parciales, límites semanales/mensuales, fallos con timestamp conservado, distribución de envíos y controles HTML. Antes de producción verificar API de envíos, tiempos y RSS en Render bajo tráfico real; no se dispone de Chromium local para captura visual.
