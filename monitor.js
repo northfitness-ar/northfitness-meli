@@ -45,6 +45,9 @@ async function update(){
   $('comparison').textContent='Comparación detallada disponible en la sección inferior.';
   $('state').className=d.stale?'error':'';$('state').textContent=d.stale?'No se pudo actualizar · '+stamp(d.fetched_at):'Última actualización: '+stamp(d.fetched_at);
   $('gross').textContent=fmt(d.gross);$('cancelled').textContent=fmt(d.cancelled);
+  const traffic=d.traffic||{};
+  $('visits').textContent=number(traffic.visits);$('paidsales').textContent=number(traffic.paid_orders);$('conversion').textContent=percent(traffic.conversion_percent);
+  $('trafficstate').textContent=(traffic.reason||'Fuente: API de visitas de Mercado Libre.')+(traffic.fetched_at?' Consulta: '+stamp(traffic.fetched_at)+'.':'');
   const estimate=d.management_estimate;$('net').textContent=fmt(estimate?estimate.result:d.net_estimate);
   $('checktax').textContent=fmt(estimate?.check_tax);$('iibb').textContent=fmt(estimate?.iibb);$('fixed').textContent=fmt(d.fixed_costs);$('merchandise').textContent=fmt(d.merchandise_cost);
   $('ads').textContent=d.ads_status==='conciliado'?fmt(d.ads):(d.ads===null?'Pendiente':fmt(d.ads))+' · '+d.ads_missing_days+' día(s) pendiente(s)';
@@ -93,11 +96,11 @@ function change(a,b,points=false){
 }
 function metricRows(target,a,b,spec){
  target.replaceChildren();
- for(const [label,key,format] of spec){const row=document.createElement('tr');cell(row,label);cell(row,format(a[key]));cell(row,format(b[key]));cell(row,change(a[key],b[key]));target.append(row);}
+ for(const [label,key,format,points] of spec){const row=document.createElement('tr');cell(row,label);cell(row,format(a[key]));cell(row,format(b[key]));cell(row,points?change(a[key],b[key])+' · '+change(a[key],b[key],true):change(a[key],b[key]));target.append(row);}
 }
 function metrics(d){
  const e=d.management_estimate||{};
- return {...d,sales:Number(d.gross)-Number(d.cancelled),result:e.result,check_tax:e.check_tax,iibb:e.iibb,tax_base:e.tax_base,
+ return {...d,visits:d.traffic?.visits,paid_orders:d.traffic?.paid_orders,conversion_percent:d.traffic?.conversion_percent,sales:Number(d.gross)-Number(d.cancelled),result:e.result,check_tax:e.check_tax,iibb:e.iibb,tax_base:e.tax_base,
  ads:d.ads_missing_days?null:d.ads,logistics_known:d.logistics_missing_orders?null:d.logistics_known,
  resultComparable:d.ads_missing_days||d.logistics_missing_orders?null:e.result};
 }
@@ -138,7 +141,11 @@ $('comparebutton').onclick=async()=>{
   $('compareranges').textContent='Seleccionado: '+stamp(a.period_start)+' — '+stamp(a.period_end)+' | Referencia: '+stamp(b.period_start)+' — '+stamp(b.period_end);
   metricRows($('comparemetrics'),metrics(a),metrics(b),[['Ventas brutas','gross',fmt],['Cancelaciones','cancelled',fmt],['Ventas netas de cancelaciones','sales',fmt],['Órdenes','orders_count',number],['Unidades','sold_units',number],['Mercadería','merchandise_cost',fmt],['Comisiones','fees',fmt],['Logística completa','logistics_known',fmt],['Órdenes con logística pendiente','logistics_missing_orders',number],['Ads cerrado','ads',fmt],['Días de Ads pendientes','ads_missing_days',number],['Gastos fijos','fixed_costs',fmt],['Impuesto al cheque','check_tax',fmt],['IIBB','iibb',fmt],['Base impositiva','tax_base',fmt],['Resultado con Ads y logística completos','resultComparable',fmt]]);
   productComparison(a.sold_products,b.sold_products);$('compareresults').hidden=false;
+  const trafficRows=document.createElement('tbody');
+  metricRows(trafficRows,metrics(a),metrics(b),[['Visitas a publicaciones','visits',number],['Ventas · órdenes pagadas','paid_orders',number],['Conversión estimada','conversion_percent',percent,true]]);
+  $('comparemetrics').prepend(...trafficRows.children);
   $('comparestate').textContent='Consultado: '+stamp(d.fetched_at)+'. Ads y logística incompletos quedan pendientes; no se comparan como cero.';
+  $('comparestate').textContent+=' Visitas: '+(a.traffic?.reason||'seleccionado disponible')+' / '+(b.traffic?.reason||'referencia disponible')+'. Conversión: variación relativa y diferencia en puntos porcentuales; fórmula estimada, no conciliada con el panel ML.';
  }catch(e){$('comparestate').textContent=e.message;}
  finally{if(id===comparisonRequest)$('comparebutton').disabled=$('period').value==='month'||!$('reference').options.length;}
 };
