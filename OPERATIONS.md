@@ -110,3 +110,40 @@ restricciones previas. No se modifican precios, stock, Ads, promociones o videos
 `GET /healthz`: `listing_photos_version: "2-delete"` identifica el despliegue.
 Actualizar el catálogo de herramientas del complemento si aún no aparece
 `nf_fotos_eliminar`. Las pruebas usan Mercado Libre simulado, sin borrar fotos reales.
+
+## Desactivar Flex por orden del titular
+
+`nf_flex_consultar(item_id)` obtiene el estado de Flex y el snapshot de una
+publicación propia. `flex_active=null` significa desconocido; nunca equivale a
+Flex desactivado. Primero usa las etiquetas explícitas `self_service_in/out` y,
+si no resuelven el estado, consulta el endpoint de Flex. Un 403 genérico no es
+prueba de que Flex esté apagado.
+
+`nf_flex_desactivar(item_id, snapshot_hash, operation_id, confirmacion)` requiere
+una orden explícita. `confirmacion=DESACTIVAR_FLEX` reconoce esa orden, no reemplaza
+OAuth ni requiere otra pregunta al usuario cuando ya indicó claramente el alcance.
+Resuelve primero los IDs exactos por producto/color. Las variantes clásicas de un
+item comparten el cambio; no prometer desactivar sólo un talle si comparte item.
+Para “todas”, recorrer `nf_publicaciones` hasta `complete=true`, identificar y
+consultar los items y ejecutarlos secuencialmente. Para una selección parcial,
+no agregar otros productos o colores. Informar resultados por item y totales de
+verificados, ya desactivados, rechazados y pendientes; el conjunto no es atómico.
+
+Sólo se envía `DELETE /sites/MLA/shipping/selfservice/items/{item_id}`, sin cuerpo.
+No se elimina la publicación ni se edita su objeto shipping, precio, stock,
+fotos, campañas, zonas, suscripción general Flex ni pedidos existentes.
+Referencia oficial: https://developers.mercadolivre.com.br/en_us/mercado-envios-flex
+
+Persistencia en `flex_changes.sqlite3`: operaciones idempotentes y bloqueo por
+publicación frente a resultados inciertos. Reutilizar el mismo operation_id en
+reintentos. No resolver un timeout reenviando con otro ID. `verified` confirma
+Flex apagado observado después del cambio y preservación de logística Full si
+estaba activa; `unchanged` indica que ya estaba apagado. Un HTTP 2xx sin lectura
+concluyente no confirma éxito. `unknown`/`verification_mismatch` quedan bloqueados:
+volver a consultar el estado, informar la incertidumbre y conciliar antes de
+cualquier nueva escritura. HTTP 401/403 detiene el lote para revisar permisos.
+No hay reactivación automática ni decisiones autónomas.
+
+`GET /healthz` expone `flex_tools_version: "1"`; confirma versión, no permisos ni
+éxito de una desactivación. Actualizar el catálogo del conector si no aparecen las
+dos herramientas. Las pruebas usan un proveedor simulado, sin modificar ventas.
