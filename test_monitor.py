@@ -19,7 +19,7 @@ def test_traffic_complete_days_cache_and_paid_orders(tmp_path):
         async def get(self, path, params):
             calls.append((path, params))
             return {'user_id':237699011, 'total_visits':40,
-                    'date_from':params['date_from'], 'date_to':params['date_to']}
+                    'date_from':params['date_from']+'T00:00:00-03:00', 'date_to':params['date_to']+'T23:59:59.999-03:00'}
     start = datetime(2026,9,17,tzinfo=TZ)
     end = start + timedelta(days=1)
     cancelled = dict(order(2), status='cancelled')
@@ -28,7 +28,7 @@ def test_traffic_complete_days_cache_and_paid_orders(tmp_path):
     assert r['conversion_percent'] == '2.5' and not r['official_equivalence_verified']
     r = asyncio.run(m.traffic(Visits(), [order(),order(3)], start, end))
     assert r['conversion_percent'] == '5' and len(calls) == 1
-    assert calls[0][1]['date_to'] == '2026-09-17T23:59:59.999-03:00'
+    assert calls[0][1]['date_to'] == '2026-09-17'
 
 @pytest.mark.parametrize('payload', [None, {}, {'user_id':237699011,'total_visits':-1},
     {'user_id':999,'total_visits':20}, {'user_id':237699011,'total_visits':True},
@@ -48,7 +48,8 @@ def test_traffic_zero_and_partial_day(tmp_path):
     m = Monitor(tmp_path, None, '237699011', 'https://example.test')
     class Visits:
         async def get(self, path, params):
-            return {'user_id':237699011,'total_visits':0,**params}
+            return {'user_id':237699011,'total_visits':0,
+                    'date_from':params['date_from']+'T00:00:00-03:00', 'date_to':params['date_to']+'T23:59:59.999-03:00'}
     start = datetime(2026,9,17,tzinfo=TZ)
     r = asyncio.run(m.traffic(Visits(), [], start, start+timedelta(days=1)))
     assert r['visits'] == 0 and r['conversion_percent'] is None

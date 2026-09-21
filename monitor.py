@@ -352,7 +352,7 @@ class Monitor:
         if start.time() != datetime.min.time() or end.time() != datetime.min.time():
             result['reason'] = 'Visitas disponibles para días completos; elegí un día cerrado.'
             return result
-        key = 'traffic:v1:' + start.isoformat() + ':' + end.isoformat()
+        key = 'traffic:v2:' + start.isoformat() + ':' + end.isoformat()
         with self.db() as c:
             cached = c.execute('SELECT body,updated_at FROM snapshots WHERE day=?', (key,)).fetchone()
         if cached and cached[1] > time.time() - 900:
@@ -362,8 +362,8 @@ class Monitor:
                        'fetched_at': datetime.now(TZ).isoformat()}
             try:
                 data = await asyncio.wait_for(client.get(f'/users/{self.seller}/items_visits', {
-                    'date_from': start.isoformat(timespec='milliseconds'),
-                    'date_to': (end-timedelta(milliseconds=1)).isoformat(timespec='milliseconds')}), 25)
+                    'date_from': start.date().isoformat(),
+                    'date_to': (end-timedelta(days=1)).date().isoformat()}), 25)
                 payload['provider_shape'] = {'type': type(data).__name__,
                     'keys': sorted(str(k) for k in data)[:20] if isinstance(data, dict) else []}
                 if isinstance(data, dict):
@@ -379,7 +379,7 @@ class Monitor:
                 payload['error_type'] = type(error).__name__
                 # Do not expose tokens, raw provider payloads or customer data.
                 message = str(error)
-                http = next((code for code in ('401', '403', '404', '429', '500', '502', '503')
+                http = next((code for code in ('400', '401', '403', '404', '422', '429', '500', '502', '503')
                              if 'HTTP ' + code in message), None)
                 payload['reason'] = ('Mercado Libre devolvió HTTP ' + http + ' al consultar visitas.' if http
                     else message if isinstance(error, ValueError) else 'No se pudo verificar la lectura de visitas.')
