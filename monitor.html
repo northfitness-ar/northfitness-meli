@@ -12,6 +12,7 @@
   <div class="identity"><img src="/monitor/assets/northfitness-logo.jpg" alt="NorthFitness"><h1>Monitor de rentabilidad</h1></div>
   <div class="controls"><label for="period">Vista</label><select id="period"><option value="day">Diario</option><option value="week">Semanal</option><option value="month">Mensual</option></select><label for="day">Fecha</label><div><input id="day" type="date"><button id="refresh">Actualizar</button></div></div>
  </header>
+ <nav class="periodnav" aria-label="Navegar períodos"><button id="periodback">← Anterior</button><strong id="periodlabel"></strong><button id="periodforward">Siguiente →</button><button id="periodtoday">Hoy</button></nav>
  <div class="livebar"><span id="live">CONECTANDO</span><time id="clock"></time><span id="range"></span></div><p id="comparison"></p>
  <p id="state" role="status">Verificando acceso…</p>
  <section class="cards" aria-label="Resumen">
@@ -37,6 +38,17 @@
    <tfoot><tr><th colspan="2">TOTAL GENERAL</th><th id="totalunits">—</th><th></th><th id="totalmerchandise">—</th><th colspan="3"></th></tr></tfoot>
   </table></div>
  </section>
+<section class="details" id="comparesection">
+ <h2>Comparar días equivalentes del mes</h2>
+ <p>Diario: mismo día de la semana. Semanal: mismos días y horario de corte, dentro del mes. Variación = (seleccionado − referencia) / referencia. No se calcula porcentaje con base cero o negativa.</p>
+ <div class="comparecontrols"><label for="reference">Período de referencia</label><select id="reference"></select><button id="comparebutton">Comparar</button></div>
+ <p id="comparestate" role="status"></p><p id="compareranges"></p>
+ <div id="compareresults" hidden>
+ <div class="tablewrap"><table><thead><tr><th>Variable</th><th>Seleccionado</th><th>Referencia</th><th>Variación</th></tr></thead><tbody id="comparemetrics"></tbody></table></div>
+ <h3>Productos y variantes vendidos</h3>
+ <p>Expandí cada producto para ver sus variantes. Cada celda muestra seleccionado / referencia y su variación. Margen: cambio en puntos porcentuales.</p>
+ <div id="compareproducts"></div>
+ </div></section>
 <section class="details"><h2>Órdenes <span id="ordercount"></span></h2>
  <label for="search">Buscar orden o producto</label><input id="search" type="search" placeholder="Número, producto o variante">
  <div class="tablewrap"><table><thead><tr><th>Fecha y hora</th><th>Orden</th><th>Estado</th><th>Producto y variante</th><th>Unidades</th><th>Venta</th><th>Comisión</th><th>Mercadería</th><th>Margen</th></tr></thead><tbody id="orders"></tbody></table></div>

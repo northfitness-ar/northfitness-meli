@@ -295,6 +295,43 @@ class Monitor:
                     return old
                 raise ValueError('No se pudo obtener una lectura completa.') from None
 
+    async def compare(self, day, mode, reference):
+        from datetime import date
+        target, base = date.fromisoformat(day), date.fromisoformat(reference)
+        now = datetime.now(TZ)
+        if mode not in ('day', 'week'):
+            raise ValueError('Elegí vista diaria o semanal para comparar días equivalentes.')
+        if (target.year, target.month) != (base.year, base.month) or target.weekday() != base.weekday() or target == base:
+            raise ValueError('Elegí otro día de la misma semana y del mismo mes.')
+        if not now.date() - timedelta(days=366) <= min(target, base) <= max(target, base) <= now.date():
+            raise ValueError('Fecha fuera del período disponible.')
+        start = datetime.combine(target, datetime.min.time(), TZ)
+        other = datetime.combine(base, datetime.min.time(), TZ)
+        if mode == 'week':
+            start -= timedelta(days=target.weekday())
+            other -= timedelta(days=base.weekday())
+        shift = start - other
+        month_start = datetime(target.year, target.month, 1, tzinfo=TZ)
+        month_end = (month_start.replace(day=28) + timedelta(days=4)).replace(day=1)
+        # Intersection retains only matched weekdays inside the selected month.
+        begin = max(start, month_start, month_start + shift)
+        end = min(start + timedelta(days=7 if mode == 'week' else 1),
+                  month_end, month_end + shift, now, now + shift)
+        if begin >= end:
+            raise ValueError('No hay días equivalentes disponibles dentro del mes.')
+        async with self.lock:
+            policy = self.config()['policy']
+            client = await self.auto.client()
+            summaries = []
+            for a, b in ((begin, end), (begin-shift, end-shift)):
+                rows, _ = await all_orders(client, self.seller, a.isoformat(), b.isoformat())
+                effective = await self.shipping_policy(client, rows, policy)
+                summary = summarize_period(rows, effective, a, b)
+                summary.pop('orders', None)
+                summaries.append(summary)
+        return {'current': summaries[0], 'reference': summaries[1],
+                'fetched_at': datetime.now(TZ).isoformat()}
+
     async def run(self):
         # Existing deployment is single-process. Read-only and independent of reply activation.
         older_day = 2
@@ -397,6 +434,19 @@ def register(mcp, api, auto, seller, data, env):
             return JSONResponse(result, headers=HEADERS)
         except ValueError as exc:
             return JSONResponse({'error': str(exc)}, status_code=503, headers=HEADERS)
+
+    @mcp.custom_route('/monitor/compare', methods=['GET'])
+    async def compare_route(request):
+        if not monitor.authorized(request):
+            return JSONResponse({'error': 'Acceso privado requerido.'}, status_code=401, headers=HEADERS)
+        try:
+            result = await monitor.compare(request.query_params.get('date', ''),
+                request.query_params.get('period', 'day'), request.query_params.get('reference', ''))
+            return JSONResponse(result, headers=HEADERS)
+        except ValueError as exc:
+            return JSONResponse({'error': str(exc)}, status_code=400, headers=HEADERS)
+        except Exception:
+            return JSONResponse({'error': 'No se pudo consultar la comparación. Reintentá.'}, status_code=503, headers=HEADERS)
 
     return monitor
 
