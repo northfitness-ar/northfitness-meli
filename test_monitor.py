@@ -391,3 +391,28 @@ def test_product_profit_period_matches_daily_and_override():
                               datetime(2026, 9, 18, tzinfo=TZ))['sold_products']
     assert daily == period
     assert daily[0]['profit'] == '125.20'
+
+
+def test_same_month_comparison_bounds_and_reject_mismatch(tmp_path, monkeypatch):
+    calls = []
+    class Auto:
+        async def client(self): return object()
+    async def read(client, seller, start, end):
+        calls.append((datetime.fromisoformat(start), datetime.fromisoformat(end)))
+        return [], 0
+    async def shipping(self, client, rows, configured): return configured
+    monkeypatch.setattr('monitor.all_orders', read)
+    monkeypatch.setattr(Monitor, 'shipping_policy', shipping)
+    m = Monitor(tmp_path, Auto(), '237699011', 'https://nf.example')
+    result = asyncio.run(m.compare('2026-08-10', 'week', '2026-08-03'))
+    assert (calls[0][0]-calls[1][0]).days == 7
+    assert calls[0][1]-calls[0][0] == calls[1][1]-calls[1][0] == timedelta(days=7)
+    assert result['current']['ads_missing_days'] == 7
+    calls.clear()
+    asyncio.run(m.compare('2026-08-03', 'week', '2026-08-31'))
+    assert all(a.month == 8 and (b-timedelta(microseconds=1)).month == 8 for a,b in calls)
+    assert calls[0][1]-calls[0][0] == calls[1][1]-calls[1][0] == timedelta(days=1)
+    with pytest.raises(ValueError):
+        asyncio.run(m.compare('2026-08-10', 'day', '2026-08-11'))
+    with pytest.raises(ValueError):
+        asyncio.run(m.compare('2026-08-10', 'day', '2026-07-13'))
