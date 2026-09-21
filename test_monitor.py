@@ -19,7 +19,7 @@ def test_traffic_complete_days_cache_and_paid_orders(tmp_path):
         async def get(self, path, params):
             calls.append((path, params))
             return {'user_id':237699011, 'total_visits':40,
-                    'date_from':params['date_from']+'T00:00:00-03:00', 'date_to':params['date_to']+'T23:59:59.999-03:00'}
+                    'date_from':params['date_from']+'T00:00:00-03:00', 'date_to':params['date_to']+'T00:00:00-03:00'}
     start = datetime(2026,9,17,tzinfo=TZ)
     end = start + timedelta(days=1)
     cancelled = dict(order(2), status='cancelled')
@@ -27,12 +27,12 @@ def test_traffic_complete_days_cache_and_paid_orders(tmp_path):
     assert r['visits'] == 40 and r['paid_orders'] == 1
     assert r['conversion_percent'] == '2.5' and not r['official_equivalence_verified']
     r = asyncio.run(m.traffic(Visits(), [order(),order(3)], start, end))
-    assert r['conversion_percent'] == '5' and len(calls) == 1
-    assert calls[0][1]['date_to'] == '2026-09-17'
+    assert r['conversion_percent'] == '2.5' and len(calls) == 1
+    assert calls[0][1]['date_to'] == '2026-09-18'
 
 @pytest.mark.parametrize('payload', [None, {}, {'user_id':237699011,'total_visits':-1},
     {'user_id':999,'total_visits':20}, {'user_id':237699011,'total_visits':True},
-    {'user_id':237699011,'total_visits':20,'date_from':'2026-09-17T00:00:00-04:00','date_to':'2026-09-18T00:00:00-04:00'}])
+    {'user_id':237699011,'total_visits':20,'date_from':'2026-09-17T00:00:00-04:00','date_to':'2026-09-17T00:00:00-04:00'}])
 def test_traffic_missing_invalid_or_wrong_cutoff_is_not_zero(tmp_path, payload):
     m = Monitor(tmp_path, None, '237699011', 'https://example.test')
     class Visits:
@@ -49,12 +49,30 @@ def test_traffic_zero_and_partial_day(tmp_path):
     class Visits:
         async def get(self, path, params):
             return {'user_id':237699011,'total_visits':0,
-                    'date_from':params['date_from']+'T00:00:00-03:00', 'date_to':params['date_to']+'T23:59:59.999-03:00'}
+                    'date_from':params['date_from']+'T00:00:00-03:00', 'date_to':params['date_to']+'T00:00:00-03:00'}
     start = datetime(2026,9,17,tzinfo=TZ)
     r = asyncio.run(m.traffic(Visits(), [], start, start+timedelta(days=1)))
     assert r['visits'] == 0 and r['conversion_percent'] is None
     r = asyncio.run(m.traffic(None, [], start, start+timedelta(hours=12)))
     assert r['visits'] is None and 'completos' in r['reason']
+
+def test_traffic_aligns_sales_to_provider_timezone(tmp_path, monkeypatch):
+    m = Monitor(tmp_path, None, '237699011', 'https://example.test')
+    calls = []
+    class Visits:
+        async def get(self, path, params):
+            return {'user_id':237699011,'total_visits':100,
+                    'date_from':params['date_from']+'T00:00:00-04:00',
+                    'date_to':params['date_to']+'T00:00:00-04:00'}
+    async def aligned(client, seller, start, end):
+        calls.append((start,end))
+        return [order(),order(2),dict(order(3),status='cancelled')],0
+    monkeypatch.setattr('monitor.all_orders', aligned)
+    start = datetime(2026,9,17,tzinfo=TZ)
+    r = asyncio.run(m.traffic(Visits(), [order()], start, start+timedelta(days=1)))
+    assert r['paid_orders'] == 2 and r['conversion_percent'] == '2'
+    assert calls == [('2026-09-17T00:00:00-04:00','2026-09-18T00:00:00-04:00')]
+    assert 'UTC-0400' in r['reason']
 
 def order(oid=1, stamp=DAY+'T11:07:00-04:00'):
     return {'id':oid,'seller':{'id':237699011},'date_created':stamp,'status':'paid','currency_id':'ARS',
