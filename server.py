@@ -999,6 +999,9 @@ def build_app(env=None):
     from listing_tools import register as register_listings
     register_listings(mcp, api, seller, data)
 
+    from flex_tools import register as register_flex
+    register_flex(mcp, api, seller, data)
+
     from monitor import register as register_monitor, install as install_monitor
     monitor = register_monitor(mcp, api, auto, seller, data, env)
 
@@ -1018,6 +1021,7 @@ def build_app(env=None):
                              'financial_reads_version': '2-release',
                              'sales_reports_version': '1',
                              'listing_photos_version': '2-delete',
+                             'flex_tools_version': '1',
                              'automatic_replies_enabled': auto.enabled(),
                              'claims_money_actions_enabled': auto.claims.enabled(),
                              'runtime': diagnostics.snapshot()})
