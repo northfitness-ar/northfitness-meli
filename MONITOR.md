@@ -85,9 +85,11 @@ La lectura por fecha de creación detecta el estado actual del pedido; no ofrece
 por fecha del reintegro ni detecta automáticamente devoluciones de ventas de más de 31 días.
 Incluye visitas a publicaciones del vendedor para intervalos de días completos,
 con consulta autenticada a `/users/{seller}/items_visits`. Valida vendedor,
-total entero no negativo y ambos límites horarios contra Argentina. Cache de
+total entero no negativo y ambos días/cortes del intervalo. El proveedor usa
+UTC−04: si difiere del horario argentino, consulta órdenes del MISMO intervalo
+de visitas para el numerador. Expone ese corte, sin modificar las finanzas. Cache de
 15 minutos, acotado a dos días de consultas. Errores, permisos insuficientes,
-respuesta incompleta o distinto corte dejan visitas y conversión pendientes,
+respuesta incompleta o período inválido dejan visitas y conversión pendientes,
 sin interrumpir el cálculo financiero ni reemplazar el dato por cero.
 
 La conversión operativa estimada es órdenes pagadas distintas / visitas × 100;
