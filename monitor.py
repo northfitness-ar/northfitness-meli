@@ -364,6 +364,10 @@ class Monitor:
                 data = await asyncio.wait_for(client.get(f'/users/{self.seller}/items_visits', {
                     'date_from': start.isoformat(timespec='milliseconds'),
                     'date_to': (end-timedelta(milliseconds=1)).isoformat(timespec='milliseconds')}), 25)
+                payload['provider_shape'] = {'type': type(data).__name__,
+                    'keys': sorted(str(k) for k in data)[:20] if isinstance(data, dict) else []}
+                if isinstance(data, dict):
+                    payload['provider_range'] = {k: data.get(k) for k in ('date_from', 'date_to')}
                 if (str(data.get('user_id')) != str(self.seller)
                         or type(data.get('total_visits')) is not int or data['total_visits'] < 0):
                     raise ValueError('Respuesta de visitas incompleta o vendedor diferente.')
@@ -372,6 +376,7 @@ class Monitor:
                     raise ValueError('El corte horario de visitas no coincide con las ventas.')
                 payload.update(visits=data['total_visits'], status='available')
             except Exception as error:
+                payload['error_type'] = type(error).__name__
                 # Do not expose tokens, raw provider payloads or customer data.
                 message = str(error)
                 http = next((code for code in ('401', '403', '404', '429', '500', '502', '503')
