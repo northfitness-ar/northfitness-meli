@@ -1017,6 +1017,7 @@ def build_app(env=None):
                              'mp_configured': bool(os.environ.get('MP_ACCESS_TOKEN', '').strip()),
                              'financial_reads_version': '2-release',
                              'sales_reports_version': '1',
+                             'listing_photos_version': '2-delete',
                              'automatic_replies_enabled': auto.enabled(),
                              'claims_money_actions_enabled': auto.claims.enabled(),
                              'runtime': diagnostics.snapshot()})

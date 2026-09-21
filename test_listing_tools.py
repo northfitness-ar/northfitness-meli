@@ -228,3 +228,118 @@ def test_uncertain_replacement_keeps_lock_and_never_resends():
         except ToolError:
             pass
         assert len(client.calls) == 2
+
+
+def deletion_item():
+    original = item()
+    original['pictures'] = [{'id': p} for p in ['PIC1', 'PIC2', 'PIC3']]
+    original['video_id'] = 'keep-video'
+    return original
+
+
+def test_delete_cover_without_replacement_preserves_order_and_is_idempotent(tmp_path):
+    original = deletion_item()
+    client = PictureClient(original)
+    changes = PictureChanges(tmp_path / 'changes.sqlite3')
+    args = (client, '123', original['id'], ['PIC2', 'PIC3'],
+            fingerprint(original), 'delete-cover-001')
+    result = run(changes.gallery(*args, remove_picture_ids=['PIC1'], delete_only=True))
+    assert result['state'] == 'verified'
+    assert result['kind'] == 'gallery_delete'
+    assert result['before'] == ['PIC1', 'PIC2', 'PIC3']
+    assert result['removed'] == ['PIC1']
+    assert result['other_settings_preserved'] is True
+    assert run(changes.gallery(*args, remove_picture_ids=['PIC1'], delete_only=True)) == result
+    assert client.calls == [('PUT', '/items/' + original['id'],
+                             {'json': {'pictures': [{'id': 'PIC2'}, {'id': 'PIC3'}]}})]
+
+
+def test_delete_rejects_invalid_scope_and_changed_or_foreign_listing(tmp_path):
+    import pytest
+    cases = [([], ['PIC1', 'PIC2', 'PIC3'], '123', None),
+             (['PIC2', 'PIC3'], [], '123', None),
+             (['PIC2', 'PIC3'], ['PIC1', 'PIC1'], '123', None),
+             (['PIC2', 'PIC3'], ['FOREIGN'], '123', None),
+             (['PIC3', 'PIC2'], ['PIC1'], '123', None),
+             (['NEW', 'PIC2', 'PIC3'], ['PIC1'], '123', None),
+             (['PIC3'], ['PIC1'], '123', None),
+             (['PIC2', 'PIC3'], ['PIC1'], '999', None),
+             (['PIC2', 'PIC3'], ['PIC1'], '123', '0' * 64)]
+    for index, (ids, removed, seller, snap) in enumerate(cases):
+        original = deletion_item()
+        client = PictureClient(original)
+        changes = PictureChanges(tmp_path / f'{index}.sqlite3')
+        with pytest.raises(ToolError):
+            run(changes.gallery(client, seller, original['id'], ids,
+                                snap or fingerprint(original), 'delete-invalid-001',
+                                remove_picture_ids=removed, delete_only=True))
+        assert client.calls == []
+
+
+def test_delete_protects_variant_photos(tmp_path):
+    import pytest
+    original = deletion_item()
+    original['variations'] = [{'id': 1, 'picture_ids': ['PIC1']}]
+    client = PictureClient(original)
+    changes = PictureChanges(tmp_path / 'changes.sqlite3')
+    with pytest.raises(ToolError):
+        run(changes.gallery(client, '123', original['id'], ['PIC2', 'PIC3'],
+                            fingerprint(original), 'delete-linked-001',
+                            remove_picture_ids=['PIC1'], delete_only=True))
+    assert client.calls == []
+
+
+def test_delete_uncertain_result_blocks_retry_with_new_id(tmp_path):
+    import pytest
+    original = deletion_item()
+    client = PictureClient(original, status=500)
+    changes = PictureChanges(tmp_path / 'changes.sqlite3')
+    args = (client, '123', original['id'], ['PIC2', 'PIC3'],
+            fingerprint(original), 'delete-unknown-001')
+    first = run(changes.gallery(*args, remove_picture_ids=['PIC1'], delete_only=True))
+    assert first['state'] == 'unknown'
+    assert run(changes.gallery(*args, remove_picture_ids=['PIC1'], delete_only=True)) == first
+    with pytest.raises(ToolError):
+        run(changes.gallery(*args[:-1], 'delete-unknown-002',
+                            remove_picture_ids=['PIC1'], delete_only=True))
+    assert len(client.calls) == 1
+
+
+def test_delete_does_not_claim_success_when_gallery_does_not_match(tmp_path):
+    class MismatchClient(PictureClient):
+        async def request(self, method, path, **kwargs):
+            self.calls.append((method, path, kwargs))
+            return Response(200)
+    original = deletion_item()
+    client = MismatchClient(original)
+    changes = PictureChanges(tmp_path / 'changes.sqlite3')
+    result = run(changes.gallery(client, '123', original['id'], ['PIC2', 'PIC3'],
+                                fingerprint(original), 'delete-mismatch-001',
+                                remove_picture_ids=['PIC1'], delete_only=True))
+    assert result['state'] == 'verification_mismatch'
+
+
+def test_delete_tool_requires_confirmation_and_registers_destructive_hint(tmp_path):
+    import pytest
+    from listing_tools import register
+    class Registry:
+        def __init__(self):
+            self.functions = {}
+            self.annotations = {}
+        def tool(self, annotations):
+            def decorate(function):
+                self.functions[function.__name__] = function
+                self.annotations[function.__name__] = annotations
+                return function
+            return decorate
+    registry = Registry()
+    original = deletion_item()
+    client = PictureClient(original)
+    register(registry, lambda: client, '123', tmp_path)
+    delete = registry.functions['nf_fotos_eliminar']
+    assert registry.annotations['nf_fotos_eliminar']['destructiveHint'] is True
+    args = (original['id'], ['PIC2', 'PIC3'], ['PIC1'], fingerprint(original), 'delete-tool-001')
+    with pytest.raises(ToolError):
+        run(delete(*args, confirmacion=''))
+    assert client.calls == []
+    assert run(delete(*args, confirmacion='ELIMINAR_FOTOS'))['state'] == 'verified'

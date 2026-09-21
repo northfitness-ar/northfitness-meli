@@ -84,3 +84,29 @@ del heap trazado para 1.000 consultas.
   mayor a los 12–14 minutos reportados. Si RSS aumenta mientras tareas y solicitudes activas quedan
   estables, tomar un perfil en producción: podría existir retención adicional en FastMCP/Authlib o
   en el allocator nativo que este repositorio no puede reproducir sin el patrón real de tráfico.
+
+## Eliminación de fotos por orden del titular
+
+`nf_fotos_eliminar` permite retirar fotos sin subir reemplazos. Su disponibilidad
+no autoriza ninguna eliminación automática: exige una orden explícita del titular
+que identifique publicación y fotos. Si el pedido es ambiguo, aclararlo; si ya es
+concreto, no pedir confirmación adicional. Con esa orden, el agente envía
+`confirmacion=ELIMINAR_FOTOS` (es un reconocimiento de la orden, no una prueba de
+identidad independiente; la identidad sigue validada por OAuth y seller).
+
+Primero leer `nf_fotos_consultar`. Enviar los IDs exactos a retirar en
+`remove_picture_ids`, y la galería restante en `picture_ids`, conservando su orden,
+con el `snapshot_hash` leído y un `operation_id` único. Debe quedar al menos una
+foto; retirar la portada convierte la siguiente en portada. Las fotos asociadas
+a variantes se rechazan para no alterar sus asociaciones. No se borran archivos
+en Drive ni del almacenamiento de imágenes de Mercado Libre.
+
+Conserva comprobaciones de vendedor, snapshot, bloqueo entre cambios de la misma
+publicación, registro del antes/después e idempotencia. Solo `verified` confirma
+el resultado leído. `unknown` o `verification_mismatch` requieren conciliación,
+sin reenviar con otro ID. Las herramientas de agregar y reemplazar mantienen sus
+restricciones previas. No se modifican precios, stock, Ads, promociones o videos.
+
+`GET /healthz`: `listing_photos_version: "2-delete"` identifica el despliegue.
+Actualizar el catálogo de herramientas del complemento si aún no aparece
+`nf_fotos_eliminar`. Las pruebas usan Mercado Libre simulado, sin borrar fotos reales.
