@@ -83,7 +83,23 @@ costos por lote/fecha y conciliar la liquidación real por orden/envío, devoluc
 No se supone que un campo genérico «Impuestos» sea IIBB devengado sin verificar su composición.
 La lectura por fecha de creación detecta el estado actual del pedido; no ofrece una contabilidad
 por fecha del reintegro ni detecta automáticamente devoluciones de ventas de más de 31 días.
-No incluye conversión/visitas, caja de Mercado Pago ni comparativo histórico por hora.
+Incluye visitas a publicaciones del vendedor para intervalos de días completos,
+con consulta autenticada a `/users/{seller}/items_visits`. Valida vendedor,
+total entero no negativo y ambos límites horarios contra Argentina. Cache de
+15 minutos, acotado a dos días de consultas. Errores, permisos insuficientes,
+respuesta incompleta o distinto corte dejan visitas y conversión pendientes,
+sin interrumpir el cálculo financiero ni reemplazar el dato por cero.
+
+La conversión operativa estimada es órdenes pagadas distintas / visitas × 100;
+no son unidades ni visitantes únicos. Su equivalencia exacta con el panel de
+Mercado Libre NO está verificada y la interfaz lo indica. No se modifica la
+política financiera. Con cero visitas no se divide ni se muestra 0% artificial.
+Las comparativas de días equivalentes incluyen visitas, órdenes pagadas y
+conversión (variación relativa y diferencia en puntos porcentuales). Para
+intervalos intradiarios quedan pendientes: no se mezclan visitas de un día
+completo con ventas de unas horas.
+
+No incluye caja de Mercado Pago ni comparativo histórico de visitas por hora.
 
 ## Validación
 
