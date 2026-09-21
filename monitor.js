@@ -48,6 +48,7 @@ async function update(){
   const traffic=d.traffic||{};
   $('visits').textContent=number(traffic.visits);$('paidsales').textContent=number(traffic.paid_orders);$('conversion').textContent=percent(traffic.conversion_percent);
   $('trafficstate').textContent=(traffic.reason||'Fuente: API de visitas de Mercado Libre.')+(traffic.fetched_at?' Consulta: '+stamp(traffic.fetched_at)+'.':'');
+  if(traffic.period_start)$('trafficstate').textContent+=' Intervalo de visitas y conversión: '+stamp(traffic.period_start)+' — '+stamp(traffic.period_end)+' (mostrado en horario argentino).';
   const estimate=d.management_estimate;$('net').textContent=fmt(estimate?estimate.result:d.net_estimate);
   $('checktax').textContent=fmt(estimate?.check_tax);$('iibb').textContent=fmt(estimate?.iibb);$('fixed').textContent=fmt(d.fixed_costs);$('merchandise').textContent=fmt(d.merchandise_cost);
   $('ads').textContent=d.ads_status==='conciliado'?fmt(d.ads):(d.ads===null?'Pendiente':fmt(d.ads))+' · '+d.ads_missing_days+' día(s) pendiente(s)';
