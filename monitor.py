@@ -14,6 +14,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 from starlette.responses import HTMLResponse, JSONResponse
 from sales_data import all_orders
+from sales_data import instant
 from profitability import summarize, summarize_period, validate_policy, amount
 
 TZ = ZoneInfo('America/Argentina/Buenos_Aires')
@@ -273,6 +274,7 @@ class Monitor:
                 rows, excluded = await all_orders(client, self.seller, start.isoformat(), end.isoformat())
                 effective_policy = await self.shipping_policy(client, rows, cfg['policy'])
                 result = summarize_period(rows, effective_policy, start, end)
+                result['traffic'] = await self.traffic(client, rows, start, end)
                 result.update(fetched_at=datetime.now(TZ).isoformat(), policy_revision=cfg['revision'],
                               stale=False, refresh_seconds=30, mode=mode, excluded_out_of_range=excluded)
                 try:
@@ -327,10 +329,64 @@ class Monitor:
                 rows, _ = await all_orders(client, self.seller, a.isoformat(), b.isoformat())
                 effective = await self.shipping_policy(client, rows, policy)
                 summary = summarize_period(rows, effective, a, b)
+                summary['traffic'] = await self.traffic(client, rows, a, b)
                 summary.pop('orders', None)
                 summaries.append(summary)
         return {'current': summaries[0], 'reference': summaries[1],
                 'fetched_at': datetime.now(TZ).isoformat()}
+
+    async def traffic(self, client, rows, start, end):
+        """Seller listing visits, isolated from financial calculations and caches.
+
+        Until reconciliation with the seller UI, conversion is explicitly an
+        operational estimate: distinct paid orders / listing visits (not units).
+        Never silently claim that this reproduces ML's private dashboard metric.
+        """
+        sales = len({str(o['id']) for o in rows if o.get('status') == 'paid'
+                     and start <= instant(o['date_created']) < end})
+        result = {'visits': None, 'paid_orders': sales, 'conversion_percent': None,
+                  'status': 'pending', 'formula': 'Órdenes pagadas / visitas × 100',
+                  'scope': 'Visitas a publicaciones, no visitantes únicos ni tienda',
+                  'official_equivalence_verified': False, 'fetched_at': None}
+        # A daily provider total cannot be used for an intraday comparison.
+        if start.time() != datetime.min.time() or end.time() != datetime.min.time():
+            result['reason'] = 'Visitas disponibles para días completos; elegí un día cerrado.'
+            return result
+        key = 'traffic:v1:' + start.isoformat() + ':' + end.isoformat()
+        with self.db() as c:
+            cached = c.execute('SELECT body,updated_at FROM snapshots WHERE day=?', (key,)).fetchone()
+        if cached and cached[1] > time.time() - 900:
+            result.update(json.loads(cached[0]))
+        else:
+            payload = {'visits': None, 'status': 'pending',
+                       'fetched_at': datetime.now(TZ).isoformat()}
+            try:
+                data = await asyncio.wait_for(client.get(f'/users/{self.seller}/items_visits', {
+                    'date_from': start.isoformat(timespec='milliseconds'),
+                    'date_to': (end-timedelta(milliseconds=1)).isoformat(timespec='milliseconds')}), 25)
+                if (str(data.get('user_id')) != str(self.seller)
+                        or type(data.get('total_visits')) is not int or data['total_visits'] < 0):
+                    raise ValueError('Respuesta de visitas incompleta o vendedor diferente.')
+                if (instant(data['date_from']) != start
+                        or instant(data['date_to']) != end-timedelta(milliseconds=1)):
+                    raise ValueError('El corte horario de visitas no coincide con las ventas.')
+                payload.update(visits=data['total_visits'], status='available')
+            except Exception as error:
+                # Do not expose tokens, raw provider payloads or customer data.
+                message = str(error)
+                http = next((code for code in ('401', '403', '404', '429', '500', '502', '503')
+                             if 'HTTP ' + code in message), None)
+                payload['reason'] = ('Mercado Libre devolvió HTTP ' + http + ' al consultar visitas.' if http
+                    else message if isinstance(error, ValueError) else 'No se pudo verificar la lectura de visitas.')
+            with self.db() as c:
+                c.execute('INSERT OR REPLACE INTO snapshots VALUES(?,?,?)', (key, json.dumps(payload), time.time()))
+                c.execute("DELETE FROM snapshots WHERE day LIKE 'traffic:%' AND updated_at < ?", (time.time()-86400*2,))
+            result.update(payload)
+        if result['visits']:
+            result['conversion_percent'] = str(amount(sales)*100/amount(result['visits']))
+        elif result['visits'] == 0:
+            result['reason'] = 'Sin visitas: conversión no calculable (no es 0%).'
+        return result
 
     async def run(self):
         # Existing deployment is single-process. Read-only and independent of reply activation.
