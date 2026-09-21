@@ -352,7 +352,7 @@ class Monitor:
         if start.time() != datetime.min.time() or end.time() != datetime.min.time():
             result['reason'] = 'Visitas disponibles para días completos; elegí un día cerrado.'
             return result
-        key = 'traffic:v2:' + start.isoformat() + ':' + end.isoformat()
+        key = 'traffic:v3:' + start.isoformat() + ':' + end.isoformat()
         with self.db() as c:
             cached = c.execute('SELECT body,updated_at FROM snapshots WHERE day=?', (key,)).fetchone()
         if cached and cached[1] > time.time() - 900:
@@ -363,7 +363,7 @@ class Monitor:
             try:
                 data = await asyncio.wait_for(client.get(f'/users/{self.seller}/items_visits', {
                     'date_from': start.date().isoformat(),
-                    'date_to': (end-timedelta(days=1)).date().isoformat()}), 25)
+                    'date_to': end.date().isoformat()}), 25)
                 payload['provider_shape'] = {'type': type(data).__name__,
                     'keys': sorted(str(k) for k in data)[:20] if isinstance(data, dict) else []}
                 if isinstance(data, dict):
@@ -371,10 +371,26 @@ class Monitor:
                 if (str(data.get('user_id')) != str(self.seller)
                         or type(data.get('total_visits')) is not int or data['total_visits'] < 0):
                     raise ValueError('Respuesta de visitas incompleta o vendedor diferente.')
-                if (instant(data['date_from']) != start
-                        or instant(data['date_to']) != end-timedelta(milliseconds=1)):
-                    raise ValueError('El corte horario de visitas no coincide con las ventas.')
-                payload.update(visits=data['total_visits'], status='available')
+                provider_start = datetime.fromisoformat(data['date_from'].replace('Z', '+00:00'))
+                provider_end = datetime.fromisoformat(data['date_to'].replace('Z', '+00:00'))
+                if (provider_start.tzinfo is None or provider_end.tzinfo is None
+                        or provider_start.date() != start.date() or provider_end.date() != end.date()
+                        or provider_start.time() != datetime.min.time()
+                        or provider_end.time() != datetime.min.time()
+                        or provider_start.utcoffset() != provider_end.utcoffset()
+                        or provider_end-provider_start != end-start):
+                    raise ValueError('El período de visitas no coincide con los días solicitados.')
+                aligned_rows = rows
+                if provider_start != start or provider_end != end:
+                    aligned_rows, _ = await all_orders(client, self.seller,
+                        provider_start.isoformat(), provider_end.isoformat())
+                aligned_sales = len({str(o['id']) for o in aligned_rows if o.get('status') == 'paid'
+                    and provider_start <= instant(o['date_created']) < provider_end})
+                payload.update(visits=data['total_visits'], paid_orders=aligned_sales, status='available',
+                    period_start=provider_start.isoformat(), period_end=provider_end.isoformat(),
+                    reason='Visitas y ventas alineadas al corte de Mercado Libre ('
+                        + provider_start.strftime('UTC%z') + '), distinto del corte financiero argentino.'
+                        if provider_start != start else 'Visitas y ventas con el mismo corte horario.')
             except Exception as error:
                 payload['error_type'] = type(error).__name__
                 # Do not expose tokens, raw provider payloads or customer data.
@@ -388,7 +404,7 @@ class Monitor:
                 c.execute("DELETE FROM snapshots WHERE day LIKE 'traffic:%' AND updated_at < ?", (time.time()-86400*2,))
             result.update(payload)
         if result['visits']:
-            result['conversion_percent'] = str(amount(sales)*100/amount(result['visits']))
+            result['conversion_percent'] = str(amount(result['paid_orders'])*100/amount(result['visits']))
         elif result['visits'] == 0:
             result['reason'] = 'Sin visitas: conversión no calculable (no es 0%).'
         return result
