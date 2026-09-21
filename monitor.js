@@ -42,8 +42,7 @@ async function update(){
   if(selectedDay!==$('day').value||selectedPeriod!==$('period').value)return;
   if(!d.stale)lastSuccess=Date.parse(d.fetched_at);$('live').textContent=d.stale?'SIN ACTUALIZAR':'LIVE';$('live').className=d.stale?'error':'';
   $('range').textContent=stamp(d.period_start)+' — '+stamp(d.period_end);
-  const comparison=d.comparison;
-  $('comparison').textContent=comparison?(comparison.percent===null?'Sin base de comparación':Number(comparison.percent).toLocaleString('es-AR',{maximumFractionDigits:1})+'% en ventas netas')+' · vs. '+stamp(comparison.start)+' — '+stamp(comparison.end):'Comparación pendiente';
+  $('comparison').textContent='Comparación detallada disponible en la sección inferior.';
   $('state').className=d.stale?'error':'';$('state').textContent=d.stale?'No se pudo actualizar · '+stamp(d.fetched_at):'Última actualización: '+stamp(d.fetched_at);
   $('gross').textContent=fmt(d.gross);$('cancelled').textContent=fmt(d.cancelled);
   const estimate=d.management_estimate;$('net').textContent=fmt(estimate?estimate.result:d.net_estimate);
@@ -55,10 +54,98 @@ async function update(){
  }catch(e){$('state').className='error';$('state').textContent=e.message;$('live').textContent='SIN ACTUALIZAR';$('live').className='error';}
  finally{busy=false;$('refresh').disabled=false;timer=setTimeout(update,(selectedDay!==$('day').value||selectedPeriod!==$('period').value)?0:Math.max(0,30000-(Date.now()-startedAt)));}
 }
+
+const iso=d=>d.toISOString().slice(0,10);
+const dayDate=s=>new Date(s+'T12:00:00Z');
+const today=()=>new Intl.DateTimeFormat('en-CA',{timeZone:'America/Argentina/Buenos_Aires',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
+function shiftDay(s,n){const d=dayDate(s);d.setUTCDate(d.getUTCDate()+n);return iso(d);}
+function dateLabel(s){return new Intl.DateTimeFormat('es-AR',{timeZone:'UTC',weekday:'long',day:'numeric',month:'long'}).format(dayDate(s));}
+function weekLabel(s){const d=dayDate(s),a=shiftDay(s,-((d.getUTCDay()+6)%7));return dateLabel(a)+' — '+dateLabel(shiftDay(a,6));}
+function navigation(){
+ const mode=$('period').value,day=$('day').value;
+ $('day').max=today();
+ $('periodlabel').textContent=mode==='week'?weekLabel(day):mode==='month'?day.slice(0,7):dateLabel(day);
+ $('periodback').textContent=mode==='week'?'← Semana anterior':'← Anterior';
+ $('periodforward').textContent=mode==='week'?'Semana siguiente →':'Siguiente →';
+ const next=mode==='month'?day.slice(0,7)>=today().slice(0,7):shiftDay(mode==='week'?shiftDay(day,-((dayDate(day).getUTCDay()+6)%7)):day,mode==='week'?7:1)>today();
+ $('periodforward').disabled=next;
+ $('reference').replaceChildren();$('compareresults').hidden=true;$('compareranges').textContent='';
+ const candidates=[];
+ for(let n=-28;n<=28;n+=7){const candidate=shiftDay(day,n);if(n&&candidate.slice(0,7)===day.slice(0,7)&&candidate<=today())candidates.push(candidate);}
+ for(const value of candidates){const option=document.createElement('option');option.value=value;option.textContent=mode==='week'?weekLabel(value):dateLabel(value);$('reference').append(option);}
+ const previous=candidates.filter(x=>x<day).at(-1);if(previous)$('reference').value=previous;
+ $('comparebutton').disabled=mode==='month'||!candidates.length;
+ $('comparestate').textContent=mode==='month'?'Elegí Diario o Semanal para comparar días equivalentes dentro del mes.':candidates.length?'Elegí la referencia y pulsá Comparar.':'Todavía no hay otro día equivalente disponible en este mes.';
+}
+function movePeriod(direction){
+ const mode=$('period').value,d=dayDate($('day').value);
+ if(mode==='month'){d.setUTCDate(1);d.setUTCMonth(d.getUTCMonth()+direction);}else d.setUTCDate(d.getUTCDate()+direction*(mode==='week'?7:1));
+ $('day').value=iso(d)>today()?today():iso(d);navigation();update();
+}
+$('periodback').onclick=()=>movePeriod(-1);$('periodforward').onclick=()=>movePeriod(1);
+$('periodtoday').onclick=()=>{$('day').value=today();navigation();update();};
+const number=v=>v===null||v===undefined?'Pendiente':Number(v).toLocaleString('es-AR',{maximumFractionDigits:2});
+function change(a,b,points=false){
+ if(a==null||b==null)return 'Pendiente';
+ if(points)return (Number(a)-Number(b)).toLocaleString('es-AR',{signDisplay:'exceptZero',maximumFractionDigits:2})+' pp';
+ if(Number(b)<=0)return Number(a)===0&&Number(b)===0?'Sin cambio':'Sin base porcentual';
+ return ((Number(a)-Number(b))*100/Number(b)).toLocaleString('es-AR',{signDisplay:'exceptZero',maximumFractionDigits:1})+'%';
+}
+function metricRows(target,a,b,spec){
+ target.replaceChildren();
+ for(const [label,key,format] of spec){const row=document.createElement('tr');cell(row,label);cell(row,format(a[key]));cell(row,format(b[key]));cell(row,change(a[key],b[key]));target.append(row);}
+}
+function metrics(d){
+ const e=d.management_estimate||{};
+ return {...d,sales:Number(d.gross)-Number(d.cancelled),result:e.result,check_tax:e.check_tax,iibb:e.iibb,tax_base:e.tax_base,
+ ads:d.ads_missing_days?null:d.ads,logistics_known:d.logistics_missing_orders?null:d.logistics_known,
+ resultComparable:d.ads_missing_days||d.logistics_missing_orders?null:e.result};
+}
+function productKey(p){return JSON.stringify([p.product,...p.variants.flatMap(v=>v.components?.length?v.listing_keys:[]).sort()]);}
+function productComparison(a,b){
+ const root=$('compareproducts');root.replaceChildren();
+ const am=new Map(a.map(p=>[productKey(p),p])),bm=new Map(b.map(p=>[productKey(p),p]));
+ const fields=[['Unidades','units',number],['Ventas','sales',fmt],['Mercadería','total_cost',fmt],['Costo/u','unit_cost',fmt],['Ganancia/u','unit_profit',fmt],['Ganancia total','profit',fmt],['Margen','margin_percent',percent]];
+ function line(table,label,x,y){
+  const tr=document.createElement('tr');cell(tr,label,'th');
+  for(const [title,k,f] of fields){const td=document.createElement('td');
+   const vx=x?x[k]:(['units','sales','total_cost','profit'].includes(k)?0:null),vy=y?y[k]:(['units','sales','total_cost','profit'].includes(k)?0:null);
+   td.textContent=f(vx)+' / '+f(vy);const small=document.createElement('small');small.textContent=change(vx,vy,k==='margin_percent');td.append(small);tr.append(td);}
+  table.append(tr);
+ }
+ for(const key of new Set([...am.keys(),...bm.keys()])){
+  const x=am.get(key),y=bm.get(key),details=document.createElement('details'),summary=document.createElement('summary');
+  summary.textContent=(x||y).product+' · '+number(x?.units||0)+' / '+number(y?.units||0)+' unidades · '+change(x?.units||0,y?.units||0);details.append(summary);
+  const wrap=document.createElement('div');wrap.className='tablewrap';const table=document.createElement('table'),thead=document.createElement('thead'),head=document.createElement('tr');
+  for(const label of ['Variante',...fields.map(f=>f[0])])cell(head,label,'th');thead.append(head);table.append(thead);
+  const body=document.createElement('tbody');
+  const ax=new Map((x?.variants||[]).map(v=>[v.variant,v])),by=new Map((y?.variants||[]).map(v=>[v.variant,v]));
+  for(const variant of new Set([...ax.keys(),...by.keys()]))line(body,variant,ax.get(variant),by.get(variant));
+  const total=v=>v?{...v,unit_cost:v.total_cost==null?null:Number(v.total_cost)/v.units}:null;
+  line(body,'TOTAL PRODUCTO',total(x),total(y));table.append(body);wrap.append(table);details.append(wrap);root.append(details);
+ }
+}
+let comparisonRequest=0;
+$('reference').onchange=()=>{$('compareresults').hidden=true;$('compareranges').textContent='';};
+$('comparebutton').onclick=async()=>{
+ const id=++comparisonRequest,day=$('day').value,mode=$('period').value,reference=$('reference').value;
+ $('comparebutton').disabled=true;$('compareresults').hidden=true;$('comparestate').textContent='Consultando ambos períodos…';
+ try{
+  const r=await fetch('/monitor/compare?'+new URLSearchParams({date:day,period:mode,reference}),{cache:'no-store'}),d=await r.json();
+  if(day!==$('day').value||mode!==$('period').value||reference!==$('reference').value)return;
+  if(!r.ok)throw new Error(d.error||'No se pudo comparar.');
+  const a=d.current,b=d.reference;
+  $('compareranges').textContent='Seleccionado: '+stamp(a.period_start)+' — '+stamp(a.period_end)+' | Referencia: '+stamp(b.period_start)+' — '+stamp(b.period_end);
+  metricRows($('comparemetrics'),metrics(a),metrics(b),[['Ventas brutas','gross',fmt],['Cancelaciones','cancelled',fmt],['Ventas netas de cancelaciones','sales',fmt],['Órdenes','orders_count',number],['Unidades','sold_units',number],['Mercadería','merchandise_cost',fmt],['Comisiones','fees',fmt],['Logística completa','logistics_known',fmt],['Órdenes con logística pendiente','logistics_missing_orders',number],['Ads cerrado','ads',fmt],['Días de Ads pendientes','ads_missing_days',number],['Gastos fijos','fixed_costs',fmt],['Impuesto al cheque','check_tax',fmt],['IIBB','iibb',fmt],['Base impositiva','tax_base',fmt],['Resultado con Ads y logística completos','resultComparable',fmt]]);
+  productComparison(a.sold_products,b.sold_products);$('compareresults').hidden=false;
+  $('comparestate').textContent='Consultado: '+stamp(d.fetched_at)+'. Ads y logística incompletos quedan pendientes; no se comparan como cero.';
+ }catch(e){$('comparestate').textContent=e.message;}
+ finally{if(id===comparisonRequest)$('comparebutton').disabled=$('period').value==='month'||!$('reference').options.length;}
+};
 async function init(){
  const token=location.hash.slice(1);
  if(token){try{const r=await fetch('/monitor/session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token})});const d=await r.json();if(!r.ok)throw new Error(d.error);}catch(e){$('state').className='error';$('state').textContent=e.message;return;}}
  clock();setInterval(clock,1000);await update();
 }
-$('period').addEventListener('change',()=>{pageIndex=0;update();});$('search').addEventListener('input',()=>{pageIndex=0;drawOrders();});$('prev').addEventListener('click',()=>{pageIndex--;drawOrders();});$('next').addEventListener('click',()=>{pageIndex++;drawOrders();});
-$('refresh').addEventListener('click',update);$('day').addEventListener('change',update);init();
+$('period').addEventListener('change',()=>{pageIndex=0;navigation();update();});$('search').addEventListener('input',()=>{pageIndex=0;drawOrders();});$('prev').addEventListener('click',()=>{pageIndex--;drawOrders();});$('next').addEventListener('click',()=>{pageIndex++;drawOrders();});
+$('refresh').addEventListener('click',update);$('day').addEventListener('change',()=>{navigation();update();});navigation();init();
