@@ -180,3 +180,7 @@ def register(mcp, api, seller, data):
         """
         return await changes.set(api(), seller, item_id, precio_ars,
                                  precio_actual_esperado_ars, snapshot_hash, operation_id)
+
+
+    from quantity_prices import register as register_quantity_prices
+    register_quantity_prices(mcp, api, seller, data)
