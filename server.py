@@ -1005,6 +1005,9 @@ def build_app(env=None):
     from monitor import register as register_monitor, install as install_monitor
     monitor = register_monitor(mcp, api, auto, seller, data, env)
 
+    from agents_audit import register as register_agents_audit, install as install_agents_audit
+    agents_audit = register_agents_audit(mcp, api, env, data, monitor, auto, seller)
+
     @mcp.custom_route('/support/oauth/callback', methods=['GET'])
     async def support_callback(request):
         return await auto.callback(request)
@@ -1022,6 +1025,7 @@ def build_app(env=None):
                              'sales_reports_version': '1',
                              'listing_photos_version': '2-delete',
                              'flex_tools_version': '1',
+                             'agents_audit_version': '1-readonly-pilot',
                              'automatic_replies_enabled': auto.enabled(),
                              'claims_money_actions_enabled': auto.claims.enabled(),
                              'runtime': diagnostics.snapshot()})
@@ -1029,10 +1033,12 @@ def build_app(env=None):
     app = mcp.http_app(path='/mcp', stateless_http=True)
     app.state.nf_mcp = mcp
     app.state.nf_auto = auto
+    app.state.nf_agents_audit = agents_audit
     app.state.nf_http_client = http_client
     app.state.nf_diagnostics = diagnostics
     install(app, auto)
     install_monitor(app, monitor, env.get('NF_MONITOR_ENABLED', '').lower() == 'true')
+    install_agents_audit(app, agents_audit)
     original = app.router.lifespan_context
 
     @contextlib.asynccontextmanager
