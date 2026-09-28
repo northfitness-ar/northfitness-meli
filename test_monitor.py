@@ -42,7 +42,7 @@ def test_traffic_missing_invalid_or_wrong_cutoff_is_not_zero(tmp_path, payload):
     start = datetime(2026,9,17,tzinfo=TZ)
     r = asyncio.run(m.traffic(Visits(), [order()], start, start+timedelta(days=1)))
     assert r['visits'] is None and r['conversion_percent'] is None
-    assert r['status'] == 'pending' and r['reason']
+    assert r['status'] == 'unavailable' and r['reason']
 
 def test_traffic_zero_and_partial_day(tmp_path):
     m = Monitor(tmp_path, None, '237699011', 'https://example.test')
@@ -251,7 +251,7 @@ def test_snapshot_recalculates_old_schema_and_matches_period_logistics(tmp_path,
         c.execute('INSERT INTO snapshots VALUES(?,?,?)', (DAY, json.dumps({'policy_revision': 1, 'fetched_at': 'old'}), time.time()))
     daily = asyncio.run(m.snapshot(DAY))
     period = asyncio.run(m.period(DAY))
-    assert daily['calculation_version'] == 2
+    assert daily['calculation_version'] == 3
     assert daily['orders'][0]['logistics'] == '19.00'
     assert daily['management_estimate']['result'] == period['management_estimate']['result']
 
@@ -478,3 +478,71 @@ def test_same_month_comparison_bounds_and_reject_mismatch(tmp_path, monkeypatch)
         asyncio.run(m.compare('2026-08-10', 'day', '2026-08-11'))
     with pytest.raises(ValueError):
         asyncio.run(m.compare('2026-08-10', 'day', '2026-07-13'))
+
+
+def test_live_traffic_current_day_cache_refresh_and_stale(tmp_path, monkeypatch):
+    import time
+    m = Monitor(tmp_path, None, '237699011', 'https://example.test')
+    calls = []
+    class Visits:
+        fail = False
+        async def get(self, path, params):
+            calls.append(params)
+            if self.fail:
+                raise RuntimeError('HTTP 503')
+            return {'user_id': 237699011, 'total_visits': 100 * len(calls),
+                    'date_from': params['date_from']+'T00:00:00-03:00',
+                    'date_to': params['date_to']+'T00:00:00-03:00'}
+    client = Visits()
+    start = datetime(2026, 9, 17, tzinfo=TZ)
+    end = start + timedelta(hours=14)
+    r = asyncio.run(m.traffic(client, [order(),order(),dict(order(2),status='cancelled')], start, end, live=True))
+    assert r['visits'] == 100 and r['conversion_percent'] == '1'
+    assert r['period_end'] == end.isoformat() and r['provisional']
+    assert r['refresh_seconds'] == 30 and calls[0]['date_to'] == '2026-09-18'
+    cached = asyncio.run(m.traffic(client, [order(),order(3)], start, end+timedelta(seconds=10), live=True))
+    assert cached['paid_orders'] == 1 and len(calls) == 1  # Same observation, not mixed cutoffs.
+    with m.db() as c: c.execute('UPDATE snapshots SET updated_at=?', (time.time()-31,))
+    refreshed = asyncio.run(m.traffic(client, [order(),order(3)], start, end+timedelta(seconds=31), live=True))
+    assert refreshed['visits'] == 200 and refreshed['paid_orders'] == 2
+    with m.db() as c: c.execute('UPDATE snapshots SET updated_at=?', (time.time()-31,))
+    client.fail = True
+    stale = asyncio.run(m.traffic(client, [], start, end+timedelta(minutes=1), live=True))
+    assert stale['stale'] and stale['visits'] == 200 and stale['conversion_percent'] == '1'
+    assert stale['fetched_at'] == refreshed['fetched_at']
+
+
+def test_live_traffic_provider_cutoff_excludes_early_orders(tmp_path):
+    m = Monitor(tmp_path, None, '237699011', 'https://example.test')
+    class Visits:
+        async def get(self, path, params):
+            return {'user_id':237699011,'total_visits':20,
+                'date_from':'2026-09-17T00:00:00-04:00','date_to':'2026-09-18T00:00:00-04:00'}
+    start = datetime(2026,9,17,tzinfo=TZ)
+    end = start + timedelta(hours=14)
+    r = asyncio.run(m.traffic(Visits(), [order(), order(2,DAY+'T00:30:00-03:00'),order(3,DAY+'T14:00:00-03:00')], start,end,live=True))
+    assert r['visits'] == 20 and r['paid_orders'] == 1 and r['conversion_percent'] == '5'
+
+
+def test_sku_grouping_preserves_variants_and_explicit_override():
+    p = policy()
+    p['products_by_sku'] = {'S': {'name':'Cinturones NF','variant':'Negro · M'}}
+    validate_policy(p)
+    a, b = order(), order(2)
+    b['order_items'][0]['item']['id'] = 'MLA2'
+    r = summarize([a,b],p,DAY)
+    assert len(r['sold_products']) == 1
+    assert r['sold_products'][0]['units'] == 4
+    assert r['sold_products'][0]['variants'][0]['listing_keys'] == ['MLA1:', 'MLA2:']
+    assert all(x['items'][0]['product'] == 'Cinturones NF' for x in r['orders'])
+    p['products'] = {'MLA2:': {'name':'Producto distinto','variant':'Otro'}}
+    assert len(summarize([a,b],p,DAY)['sold_products']) == 2
+    p['kits'] = {'MLA1:':[{'sku':'S','quantity':2}]}
+    del p['products']
+    assert len(summarize([a,b],p,DAY)['sold_products']) == 2
+
+
+@pytest.mark.parametrize('mapping', [{'':{'name':'NF','variant':'M'}}, {'S':{'name':'NF','variant':''}}])
+def test_invalid_sku_mappings(mapping):
+    p=policy(); p['products_by_sku']=mapping
+    with pytest.raises(ValueError): validate_policy(p)

@@ -123,3 +123,24 @@ kits, campos pendientes, control de revisión, persistencia, cache y acceso priv
 - Para limitar carga se consultan hasta 8 envíos por lectura y presupuesto de inicio de 8 segundos, con timeout de 2 segundos por solicitud y caché SQLite de una hora. La interfaz diferencia logística registrada y órdenes pendientes; el resultado estimado sólo descuenta lo registrado. El primer período puede requerir varias actualizaciones para completar envíos. Se conserva el pool HTTP compartido y `/healthz`.
 
 Validación local: pruebas de tasas netas de cancelación, costos por fecha, gastos diarios, Ads parciales, límites semanales/mensuales, fallos con timestamp conservado, distribución de envíos y controles HTML. Antes de producción verificar API de envíos, tiempos y RSS en Render bajo tráfico real; no se dispone de Chromium local para captura visual.
+
+## Visitas durante el día y familias por SKU (28/09/2026)
+
+La vista diaria, semanal y mensual en curso consulta `items_visits` con el rango
+calendario que incluye el día actual. Caché de tráfico: 30 segundos en curso y
+15 minutos para días cerrados. El monitor muestra el acumulado provisorio y la
+hora de consulta; no garantiza que Mercado Libre entregue cada visita al instante.
+Las órdenes pagadas se deduplican y se alinean al corte horario devuelto por ML,
+limitadas al instante de lectura para el período en curso. Un corte parcial
+histórico no se reconstruye con totales diarios. Cero visitas deja la conversión
+sin denominador; un fallo conserva la última lectura con aviso de desactualización.
+
+`products_by_sku` permite asociar un SKU exacto verificado a `{name, variant}`.
+Tiene prioridad el mapa explícito `products` por publicación y variante. Los kits
+no heredan la familia de un componente. Se mantiene el detalle por color/talle,
+los importes ponderados y un único subtotal por familia. No se agrupa por títulos.
+El cambio de agrupación usa los costos existentes; la configuración productiva
+vincula las publicaciones verificadas de cinturones y muñequeras, incluida rosa.
+
+`GET /healthz` identifica esta versión con
+`monitor_version: "4-live-traffic-sku-groups"`.

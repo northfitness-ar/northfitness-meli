@@ -153,7 +153,7 @@ class Monitor:
             cfg = self.config()
             if not force and cached and time.time() - cached[1] < 300:
                 body = json.loads(cached[0])
-                if body['policy_revision'] == cfg['revision'] and body.get('calculation_version') == 2:
+                if body['policy_revision'] == cfg['revision'] and body.get('calculation_version') == 3:
                     return body
             try:
                 client = await self.auto.client()
@@ -168,8 +168,9 @@ class Monitor:
                     ads_error = 'Publicidad no disponible; no se reemplazó por cero.'
                 effective_policy = await self.shipping_policy(client, rows, cfg['policy'])
                 result = summarize(rows, effective_policy, day, ads)
+                result['traffic'] = await self.traffic(client, rows, start, end, live=target == today)
                 result.update(fetched_at=datetime.now(TZ).isoformat(), policy_revision=cfg['revision'],
-                              calculation_version=2,
+                              calculation_version=3,
                               excluded_out_of_range=excluded, ads_error=ads_error, stale=False,
                               refresh_seconds=300, period_end=end.isoformat())
                 with self.db() as c:
@@ -274,7 +275,7 @@ class Monitor:
                 rows, excluded = await all_orders(client, self.seller, start.isoformat(), end.isoformat())
                 effective_policy = await self.shipping_policy(client, rows, cfg['policy'])
                 result = summarize_period(rows, effective_policy, start, end)
-                result['traffic'] = await self.traffic(client, rows, start, end)
+                result['traffic'] = await self.traffic(client, rows, start, end, live=end == now)
                 result.update(fetched_at=datetime.now(TZ).isoformat(), policy_revision=cfg['revision'],
                               stale=False, refresh_seconds=30, mode=mode, excluded_out_of_range=excluded)
                 try:
@@ -329,13 +330,13 @@ class Monitor:
                 rows, _ = await all_orders(client, self.seller, a.isoformat(), b.isoformat())
                 effective = await self.shipping_policy(client, rows, policy)
                 summary = summarize_period(rows, effective, a, b)
-                summary['traffic'] = await self.traffic(client, rows, a, b)
+                summary['traffic'] = await self.traffic(client, rows, a, b, live=b == now)
                 summary.pop('orders', None)
                 summaries.append(summary)
         return {'current': summaries[0], 'reference': summaries[1],
                 'fetched_at': datetime.now(TZ).isoformat()}
 
-    async def traffic(self, client, rows, start, end):
+    async def traffic(self, client, rows, start, end, *, live=False):
         """Seller listing visits, isolated from financial calculations and caches.
 
         Until reconciliation with the seller UI, conversion is explicitly an
@@ -345,25 +346,29 @@ class Monitor:
         sales = len({str(o['id']) for o in rows if o.get('status') == 'paid'
                      and start <= instant(o['date_created']) < end})
         result = {'visits': None, 'paid_orders': sales, 'conversion_percent': None,
-                  'status': 'pending', 'formula': 'Órdenes pagadas / visitas × 100',
+                  'status': 'unavailable', 'formula': 'Órdenes pagadas / visitas × 100',
                   'scope': 'Visitas a publicaciones, no visitantes únicos ni tienda',
-                  'official_equivalence_verified': False, 'fetched_at': None}
-        # A daily provider total cannot be used for an intraday comparison.
-        if start.time() != datetime.min.time() or end.time() != datetime.min.time():
-            result['reason'] = 'Visitas disponibles para días completos; elegí un día cerrado.'
+                  'official_equivalence_verified': False, 'fetched_at': None,
+                  'refresh_seconds': 30 if live else 900, 'provisional': live, 'stale': False}
+        # A historical partial day cannot be reconstructed from daily totals.
+        # For the live period query today's entire provider bucket, then cap paid
+        # orders at the read cutoff. ML's reporting latency remains unknown.
+        if start.time() != datetime.min.time() or (end.time() != datetime.min.time() and not live):
+            result['reason'] = 'Mercado Libre no ofrece el corte intradiario histórico; seleccioná días completos.'
             return result
-        key = 'traffic:v3:' + start.isoformat() + ':' + end.isoformat()
+        query_end = datetime.combine(end.date() + timedelta(days=1), datetime.min.time(), TZ) if live else end
+        key = 'traffic:v4:' + ('live:' if live else 'closed:') + start.isoformat() + ':' + query_end.isoformat()
         with self.db() as c:
             cached = c.execute('SELECT body,updated_at FROM snapshots WHERE day=?', (key,)).fetchone()
-        if cached and cached[1] > time.time() - 900:
+        if cached and cached[1] > time.time() - result['refresh_seconds']:
             result.update(json.loads(cached[0]))
         else:
-            payload = {'visits': None, 'status': 'pending',
+            payload = {'visits': None, 'paid_orders': None, 'status': 'unavailable',
                        'fetched_at': datetime.now(TZ).isoformat()}
             try:
                 data = await asyncio.wait_for(client.get(f'/users/{self.seller}/items_visits', {
                     'date_from': start.date().isoformat(),
-                    'date_to': end.date().isoformat()}), 25)
+                    'date_to': query_end.date().isoformat()}), 12)
                 payload['provider_shape'] = {'type': type(data).__name__,
                     'keys': sorted(str(k) for k in data)[:20] if isinstance(data, dict) else []}
                 if isinstance(data, dict):
@@ -374,23 +379,29 @@ class Monitor:
                 provider_start = datetime.fromisoformat(data['date_from'].replace('Z', '+00:00'))
                 provider_end = datetime.fromisoformat(data['date_to'].replace('Z', '+00:00'))
                 if (provider_start.tzinfo is None or provider_end.tzinfo is None
-                        or provider_start.date() != start.date() or provider_end.date() != end.date()
+                        or provider_start.date() != start.date() or provider_end.date() != query_end.date()
                         or provider_start.time() != datetime.min.time()
                         or provider_end.time() != datetime.min.time()
                         or provider_start.utcoffset() != provider_end.utcoffset()
-                        or provider_end-provider_start != end-start):
+                        or provider_end-provider_start != query_end-start):
                     raise ValueError('El período de visitas no coincide con los días solicitados.')
+                effective_end = min(provider_end, end) if live else provider_end
+                if effective_end <= provider_start:
+                    raise ValueError('El día de visitas de Mercado Libre todavía no comenzó.')
                 aligned_rows = rows
-                if provider_start != start or provider_end != end:
+                if provider_start < start or effective_end > end:
                     aligned_rows, _ = await all_orders(client, self.seller,
-                        provider_start.isoformat(), provider_end.isoformat())
+                        provider_start.isoformat(), effective_end.isoformat())
                 aligned_sales = len({str(o['id']) for o in aligned_rows if o.get('status') == 'paid'
-                    and provider_start <= instant(o['date_created']) < provider_end})
+                    and provider_start <= instant(o['date_created']) < effective_end})
                 payload.update(visits=data['total_visits'], paid_orders=aligned_sales, status='available',
-                    period_start=provider_start.isoformat(), period_end=provider_end.isoformat(),
+                    period_start=provider_start.isoformat(), period_end=effective_end.isoformat(),
+                    provider_period_end=provider_end.isoformat(),
                     reason='Visitas y ventas alineadas al corte de Mercado Libre ('
                         + provider_start.strftime('UTC%z') + '), distinto del corte financiero argentino.'
                         if provider_start != start else 'Visitas y ventas con el mismo corte horario.')
+                if live:
+                    payload['reason'] += ' Actualización cada 30 s; acumulado provisorio sujeto a la demora de Mercado Libre.'
             except Exception as error:
                 payload['error_type'] = type(error).__name__
                 # Do not expose tokens, raw provider payloads or customer data.
@@ -399,6 +410,14 @@ class Monitor:
                              if 'HTTP ' + code in message), None)
                 payload['reason'] = ('Mercado Libre devolvió HTTP ' + http + ' al consultar visitas.' if http
                     else message if isinstance(error, ValueError) else 'No se pudo verificar la lectura de visitas.')
+            if payload['visits'] is None and cached:
+                previous = json.loads(cached[0])
+                if previous.get('visits') is not None:
+                    previous.update(stale=True, status='stale', reason='Falló la consulta; última lectura conservada. ' + payload['reason'])
+                    result.update(previous)
+                    if result['visits']:
+                        result['conversion_percent'] = str(amount(result['paid_orders'])*100/amount(result['visits']))
+                    return result
             with self.db() as c:
                 c.execute('INSERT OR REPLACE INTO snapshots VALUES(?,?,?)', (key, json.dumps(payload), time.time()))
                 c.execute("DELETE FROM snapshots WHERE day LIKE 'traffic:%' AND updated_at < ?", (time.time()-86400*2,))

@@ -1022,6 +1022,7 @@ def build_app(env=None):
                              'sales_reports_version': '1',
                              'listing_photos_version': '2-delete',
                              'flex_tools_version': '1',
+                             'monitor_version': '4-live-traffic-sku-groups',
                              'automatic_replies_enabled': auto.enabled(),
                              'claims_money_actions_enabled': auto.claims.enabled(),
                              'runtime': diagnostics.snapshot()})

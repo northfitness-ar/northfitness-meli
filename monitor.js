@@ -46,7 +46,8 @@ async function update(){
   $('state').className=d.stale?'error':'';$('state').textContent=d.stale?'No se pudo actualizar · '+stamp(d.fetched_at):'Última actualización: '+stamp(d.fetched_at);
   $('gross').textContent=fmt(d.gross);$('cancelled').textContent=fmt(d.cancelled);
   const traffic=d.traffic||{};
-  $('visits').textContent=number(traffic.visits);$('paidsales').textContent=number(traffic.paid_orders);$('conversion').textContent=percent(traffic.conversion_percent);
+  $('visits').textContent=traffic.visits==null?'No disponible':number(traffic.visits);$('paidsales').textContent=traffic.paid_orders==null?'No disponible':number(traffic.paid_orders);$('conversion').textContent=traffic.conversion_percent==null?(traffic.visits===0?'Sin visitas':'No disponible'):percent(traffic.conversion_percent);
+  $('trafficstate').className=traffic.stale||traffic.status==='unavailable'?'error':'';
   $('trafficstate').textContent=(traffic.reason||'Fuente: API de visitas de Mercado Libre.')+(traffic.fetched_at?' Consulta: '+stamp(traffic.fetched_at)+'.':'');
   if(traffic.period_start)$('trafficstate').textContent+=' Intervalo de visitas y conversión: '+stamp(traffic.period_start)+' — '+stamp(traffic.period_end)+' (mostrado en horario argentino).';
   const estimate=d.management_estimate;$('net').textContent=fmt(estimate?estimate.result:d.net_estimate);

@@ -54,12 +54,14 @@ def validate_policy(policy):
     for key, parts in policy.get('kits', {}).items():
         if not parts or any(not p.get('sku') or type(p.get('quantity')) is not int or p['quantity'] <= 0 for p in parts):
             raise ValueError('Kit requiere componentes con cantidades enteras positivas.')
-    for key, product in policy.get('products', {}).items():
-        if (not re.fullmatch(r'MLA[0-9]+:[0-9]*', key) or not isinstance(product, dict)
-                or not isinstance(product.get('name'), str) or not product['name'].strip()
-                or len(product['name']) > 200 or not isinstance(product.get('variant'), str)
-                or not product['variant'].strip() or len(product['variant']) > 200):
-            raise ValueError('Producto requiere clave item_id:variation_id, nombre y variante explícitos.')
+    for field in ('products', 'products_by_sku'):
+        for key, product in policy.get(field, {}).items():
+            valid_key = bool(re.fullmatch(r'MLA[0-9]+:[0-9]*', key)) if field == 'products' else bool(key.strip()) and len(key) <= 200
+            if (not valid_key or not isinstance(product, dict)
+                    or not isinstance(product.get('name'), str) or not product['name'].strip()
+                    or len(product['name']) > 200 or not isinstance(product.get('variant'), str)
+                    or not product['variant'].strip() or len(product['variant']) > 200):
+                raise ValueError('Producto requiere clave válida, nombre y variante explícitos.')
     for order_id, facts in policy.get('orders', {}).items():
         if not order_id.isdigit() or not facts.get('source'):
             raise ValueError('Conciliación requiere ID de orden y fuente.')
@@ -97,9 +99,22 @@ def variant_label(item):
     return ' · '.join(values) or 'Sin variante'
 
 
+def product_mapping(policy, item):
+    """Exact verified identifiers only. An explicit listing mapping takes priority.
+
+    Kits must never inherit a component SKU's family mapping.
+    """
+    key = str(item['id']) + ':' + str(item.get('variation_id') or '')
+    mapped = policy.get('products', {}).get(key)
+    if mapped or key in policy.get('kits', {}):
+        return mapped or {}
+    sku = item.get('seller_sku') or item.get('seller_custom_field')
+    return policy.get('products_by_sku', {}).get(sku, {})
+
+
 def sold_products_add(groups, policy, item, qty, stamp, line=None, facts=None, single_line=True):
     listing_key = str(item['id']) + ':' + str(item.get('variation_id') or '')
-    mapped = policy.get('products', {}).get(listing_key)
+    mapped = product_mapping(policy, item)
     is_kit = listing_key in policy.get('kits', {})
     if mapped:
         product, variant = mapped['name'].strip(), mapped['variant'].strip()
@@ -294,8 +309,8 @@ def summarize(orders, policy, day, ads_reported=None):
             complete_orders += 1
         missing.extend(oid + ':' + gap for gap in gaps)
         entries.append({'id': oid, 'status': status, 'date_created': order['date_created'],
-                        'items': [{'product': policy.get('products', {}).get(str(l['item']['id']) + ':' + str(l['item'].get('variation_id') or ''), {}).get('name', l['item'].get('title', l['item']['id'])),
-                                   'variant': policy.get('products', {}).get(str(l['item']['id']) + ':' + str(l['item'].get('variation_id') or ''), {}).get('variant', variant_label(l['item'])),
+                        'items': [{'product': product_mapping(policy, l['item']).get('name', l['item'].get('title', l['item']['id'])),
+                                   'variant': product_mapping(policy, l['item']).get('variant', variant_label(l['item'])),
                                    'units': l['quantity']} for l in lines],
                         'logistics': money(logistics) if 'logistics' in facts else None,
                         'revenue': money(net_revenue),
