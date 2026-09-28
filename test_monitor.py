@@ -546,3 +546,19 @@ def test_sku_grouping_preserves_variants_and_explicit_override():
 def test_invalid_sku_mappings(mapping):
     p=policy(); p['products_by_sku']=mapping
     with pytest.raises(ValueError): validate_policy(p)
+
+
+def test_traffic_diagnostic_is_bounded_and_aggregate_only(tmp_path):
+    calls = []
+    class Client:
+        async def get(self, path, params):
+            calls.append(params)
+            return {'user_id':237699011,'total_visits':844, **params, 'private':'not returned'}
+    class Auto:
+        async def client(self): return Client()
+    m=Monitor(tmp_path,Auto(),'237699011','https://example.test')
+    r=asyncio.run(m.diagnose_traffic(datetime.now(TZ).date().isoformat()))
+    assert len(calls) == 2 and len(r['probes']) == 2
+    assert all(x['date_from'].endswith('-03:00') for x in calls)
+    assert all(x['total_visits'] == 844 and 'private' not in x for x in r['probes'])
+    assert not r['official_equivalence_verified']

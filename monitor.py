@@ -428,6 +428,36 @@ class Monitor:
             result['reason'] = 'Sin visitas: conversión no calculable (no es 0%).'
         return result
 
+    async def diagnose_traffic(self, day):
+        """Bounded read-only probes of documented ISO date parameters.
+
+        Invoked only by an explicit summary tool call, never by dashboard polling.
+        Return aggregate evidence; no credentials or buyer information.
+        """
+        from datetime import date
+        target = date.fromisoformat(day)
+        now = datetime.now(TZ)
+        if not now.date() - timedelta(days=150) <= target <= now.date():
+            return {'status': 'outside_visit_range'}
+        start = datetime.combine(target, datetime.min.time(), TZ)
+        end = min(start + timedelta(days=1), now)
+        client = await self.auto.client()
+        probes = []
+        for label, stop in (('argentina_elapsed', end), ('argentina_calendar', start + timedelta(days=1))):
+            params = {'date_from': start.isoformat(), 'date_to': stop.isoformat()}
+            entry = {'query': label, 'requested_range': params,
+                     'fetched_at': datetime.now(TZ).isoformat()}
+            try:
+                data = await asyncio.wait_for(client.get(f'/users/{self.seller}/items_visits', params), 8)
+                if not isinstance(data, dict) or str(data.get('user_id')) != str(self.seller):
+                    raise ValueError('Unexpected seller response')
+                entry.update({k: data.get(k) for k in ('total_visits', 'date_from', 'date_to')})
+                entry['status'] = 'received'
+            except Exception as exc:
+                entry.update(status='unavailable', error_type=type(exc).__name__)
+            probes.append(entry)
+        return {'probes': probes, 'official_equivalence_verified': False}
+
     async def run(self):
         # Existing deployment is single-process. Read-only and independent of reply activation.
         older_day = 2
@@ -479,7 +509,12 @@ def register(mcp, api, auto, seller, data, env):
         """Monitor por día de Argentina, últimos 366 días. Cache 5 minutos; neto nulo si faltan costos/conciliación."""
         api()
         try:
-            return await monitor.snapshot(fecha)
+            result = copy.deepcopy(await monitor.snapshot(fecha))
+            try:
+                result['traffic_diagnostic'] = await monitor.diagnose_traffic(fecha)
+            except Exception:
+                result['traffic_diagnostic'] = {'status': 'unavailable'}
+            return result
         except ValueError as exc:
             raise ToolError(str(exc)) from None
 
