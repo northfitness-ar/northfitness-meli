@@ -1024,6 +1024,7 @@ def build_app(env=None):
                              'flex_tools_version': '1',
                              'monitor_version': '5-traffic-reconciliation',
                              'automatic_replies_enabled': auto.enabled(),
+                             'support_content_version': auto.status()['content_policy_version'],
                              'claims_money_actions_enabled': auto.claims.enabled(),
                              'runtime': diagnostics.snapshot()})
 
