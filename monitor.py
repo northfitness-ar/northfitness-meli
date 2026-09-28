@@ -347,7 +347,7 @@ class Monitor:
                      and start <= instant(o['date_created']) < end})
         result = {'visits': None, 'paid_orders': sales, 'conversion_percent': None,
                   'status': 'unavailable', 'formula': 'Órdenes pagadas / visitas × 100',
-                  'scope': 'Visitas a publicaciones, no visitantes únicos ni tienda',
+                  'scope': 'Visitas a publicaciones de la cuenta; equivalencia con visitas únicas del panel ML no verificada',
                   'official_equivalence_verified': False, 'fetched_at': None,
                   'refresh_seconds': 30 if live else 900, 'provisional': live, 'stale': False}
         # A historical partial day cannot be reconstructed from daily totals.
