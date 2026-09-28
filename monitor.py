@@ -444,7 +444,7 @@ class Monitor:
         client = await self.auto.client()
         probes = []
         for label, stop in (('argentina_elapsed', end), ('argentina_calendar', start + timedelta(days=1))):
-            params = {'date_from': start.isoformat(), 'date_to': stop.isoformat()}
+            params = {'date_from': start.isoformat(timespec='milliseconds'), 'date_to': stop.isoformat(timespec='milliseconds')}
             entry = {'query': label, 'requested_range': params,
                      'fetched_at': datetime.now(TZ).isoformat()}
             try:
@@ -454,7 +454,11 @@ class Monitor:
                 entry.update({k: data.get(k) for k in ('total_visits', 'date_from', 'date_to')})
                 entry['status'] = 'received'
             except Exception as exc:
-                entry.update(status='unavailable', error_type=type(exc).__name__)
+                http = next((code for code in (400,401,403,404,422,429,500,502,503) if 'HTTP ' + str(code) in str(exc)), None)
+                entry.update(status='unavailable', error_type=type(exc).__name__, http_status=http)
+                if http in (401,403,429):
+                    probes.append(entry)
+                    break
             probes.append(entry)
         return {'probes': probes, 'official_equivalence_verified': False}
 
