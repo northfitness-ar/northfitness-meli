@@ -57,8 +57,7 @@ Se reemplaza la configuración completa, con control de versión e historial: le
   con una base consistente con el ajuste impositivo. ISO con zona para la vigencia.
 - `kits`: objeto con clave `item_id:variation_id` (variante ausente: `MLA123:`), valor
   lista `{sku, quantity}`. No se calcula con márgenes comerciales históricos fijos.
-- `products`: mapeo explícito por `item_id:variation_id` a `{name, variant}`. Sólo este mapeo
-  permite unificar publicaciones bajo un producto y variante; nunca se infiere por títulos parecidos.
+- `products`: mapeo explícito por `item_id:variation_id` a `{name, variant}`. Este mapeo tiene prioridad sobre los SKUs exactos verificados de cinturones y muñequeras; nunca se infiere por títulos parecidos.
   Los kits permanecen separados aunque compartan nombre y su costo suma los componentes de `kits`.
 - `orders`: objeto por ID de orden **como texto**, con `source` y campos conciliados:
   - `refund`: importe reintegrado de una venta pagada; cero solamente si fue verificado.
@@ -83,23 +82,22 @@ costos por lote/fecha y conciliar la liquidación real por orden/envío, devoluc
 No se supone que un campo genérico «Impuestos» sea IIBB devengado sin verificar su composición.
 La lectura por fecha de creación detecta el estado actual del pedido; no ofrece una contabilidad
 por fecha del reintegro ni detecta automáticamente devoluciones de ventas de más de 31 días.
-Incluye visitas a publicaciones del vendedor para intervalos de días completos,
-con consulta autenticada a `/users/{seller}/items_visits`. Valida vendedor,
-total entero no negativo y ambos días/cortes del intervalo. El proveedor usa
-UTC−04: si difiere del horario argentino, consulta órdenes del MISMO intervalo
-de visitas para el numerador. Expone ese corte, sin modificar las finanzas. Cache de
-15 minutos, acotado a dos días de consultas. Errores, permisos insuficientes,
-respuesta incompleta o período inválido dejan visitas y conversión pendientes,
-sin interrumpir el cálculo financiero ni reemplazar el dato por cero.
+Incluye visitas a publicaciones del vendedor, incluido el acumulado del día en curso.
+Consulta `/users/{seller}/items_visits` hasta el límite del día siguiente para incluir hoy;
+valida identidad, totales y fechas del proveedor. Las ventas se alinean al corte informado
+por Mercado Libre, limitado al instante consultado en períodos abiertos. No modifica los
+cortes financieros argentinos. La lectura abierta es provisional, con caché de 30 segundos;
+los períodos cerrados conservan caché de 15 minutos. El par visitas/órdenes y su fecha
+se cachean juntos para no mezclar numeradores nuevos con visitas anteriores.
 
-La conversión operativa estimada es órdenes pagadas distintas / visitas × 100;
-no son unidades ni visitantes únicos. Su equivalencia exacta con el panel de
-Mercado Libre NO está verificada y la interfaz lo indica. No se modifica la
-política financiera. Con cero visitas no se divide ni se muestra 0% artificial.
-Las comparativas de días equivalentes incluyen visitas, órdenes pagadas y
-conversión (variación relativa y diferencia en puntos porcentuales). Para
-intervalos intradiarios quedan pendientes: no se mezclan visitas de un día
-completo con ventas de unas horas.
+Conversión estimada = órdenes pagadas distintas / visitas × 100, sin unidades ni canceladas.
+La demora propia de Mercado Libre no se puede eliminar ni se promete equivalencia con su
+panel privado. Cero visitas muestra «Sin visitas»; error o corte histórico intradiario no
+reconstruible muestra «No disponible» con motivo concreto. Nunca inventa cero.
+
+Cinturones y muñequeras se agrupan también por siete SKUs exactos verificados el 28/09/2026,
+incluida muñequera rosa. El mapeo explícito de publicación prevalece; kits quedan separados.
+Esto reúne nuevas publicaciones del mismo SKU sin inferir familias por títulos o prefijos.
 
 No incluye caja de Mercado Pago ni comparativo histórico de visitas por hora.
 

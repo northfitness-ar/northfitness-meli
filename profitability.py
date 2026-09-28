@@ -97,9 +97,32 @@ def variant_label(item):
     return ' · '.join(values) or 'Sin variante'
 
 
+# Exact standalone SKUs verified against Mercado Libre on 2026-09-28.
+# Never classify by title/prefix: bundles have their own SKU and remain separate.
+VERIFIED_PRODUCT_SKUS = {
+    'CPNF01NGL': ('Cinturones NF', 'Negro · L'),
+    'CPNF01NGM': ('Cinturones NF', 'Negro · M'),
+    'CPNF01RJL': ('Cinturones NF', 'Rojo · L'),
+    'CPNF01RJM': ('Cinturones NF', 'Rojo · M'),
+    'MQNF01NG': ('Muñequeras NF', 'Negro'),
+    'MQNF01RJ': ('Muñequeras NF', 'Rojo'),
+    'MQNF01RS': ('Muñequeras NF', 'Rosa'),
+}
+
+
+def product_mapping(policy, item):
+    key = str(item['id']) + ':' + str(item.get('variation_id') or '')
+    explicit = policy.get('products', {}).get(key)
+    if explicit or key in policy.get('kits', {}):
+        return explicit or {}
+    sku = item.get('seller_sku') or item.get('seller_custom_field')
+    verified = VERIFIED_PRODUCT_SKUS.get(sku)
+    return {'name': verified[0], 'variant': verified[1]} if verified else {}
+
+
 def sold_products_add(groups, policy, item, qty, stamp, line=None, facts=None, single_line=True):
     listing_key = str(item['id']) + ':' + str(item.get('variation_id') or '')
-    mapped = policy.get('products', {}).get(listing_key)
+    mapped = product_mapping(policy, item)
     is_kit = listing_key in policy.get('kits', {})
     if mapped:
         product, variant = mapped['name'].strip(), mapped['variant'].strip()
@@ -294,8 +317,8 @@ def summarize(orders, policy, day, ads_reported=None):
             complete_orders += 1
         missing.extend(oid + ':' + gap for gap in gaps)
         entries.append({'id': oid, 'status': status, 'date_created': order['date_created'],
-                        'items': [{'product': policy.get('products', {}).get(str(l['item']['id']) + ':' + str(l['item'].get('variation_id') or ''), {}).get('name', l['item'].get('title', l['item']['id'])),
-                                   'variant': policy.get('products', {}).get(str(l['item']['id']) + ':' + str(l['item'].get('variation_id') or ''), {}).get('variant', variant_label(l['item'])),
+                        'items': [{'product': product_mapping(policy, l['item']).get('name', l['item'].get('title', l['item']['id'])),
+                                   'variant': product_mapping(policy, l['item']).get('variant', variant_label(l['item'])),
                                    'units': l['quantity']} for l in lines],
                         'logistics': money(logistics) if 'logistics' in facts else None,
                         'revenue': money(net_revenue),

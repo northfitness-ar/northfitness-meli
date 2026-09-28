@@ -42,7 +42,7 @@ def test_traffic_missing_invalid_or_wrong_cutoff_is_not_zero(tmp_path, payload):
     start = datetime(2026,9,17,tzinfo=TZ)
     r = asyncio.run(m.traffic(Visits(), [order()], start, start+timedelta(days=1)))
     assert r['visits'] is None and r['conversion_percent'] is None
-    assert r['status'] == 'pending' and r['reason']
+    assert r['status'] == 'unavailable' and r['reason']
 
 def test_traffic_zero_and_partial_day(tmp_path):
     m = Monitor(tmp_path, None, '237699011', 'https://example.test')
@@ -54,7 +54,7 @@ def test_traffic_zero_and_partial_day(tmp_path):
     r = asyncio.run(m.traffic(Visits(), [], start, start+timedelta(days=1)))
     assert r['visits'] == 0 and r['conversion_percent'] is None
     r = asyncio.run(m.traffic(None, [], start, start+timedelta(hours=12)))
-    assert r['visits'] is None and 'completos' in r['reason']
+    assert r['visits'] is None and 'históricas' in r['reason']
 
 def test_traffic_aligns_sales_to_provider_timezone(tmp_path, monkeypatch):
     m = Monitor(tmp_path, None, '237699011', 'https://example.test')
@@ -251,7 +251,7 @@ def test_snapshot_recalculates_old_schema_and_matches_period_logistics(tmp_path,
         c.execute('INSERT INTO snapshots VALUES(?,?,?)', (DAY, json.dumps({'policy_revision': 1, 'fetched_at': 'old'}), time.time()))
     daily = asyncio.run(m.snapshot(DAY))
     period = asyncio.run(m.period(DAY))
-    assert daily['calculation_version'] == 2
+    assert daily['calculation_version'] == 3
     assert daily['orders'][0]['logistics'] == '19.00'
     assert daily['management_estimate']['result'] == period['management_estimate']['result']
 
@@ -478,3 +478,56 @@ def test_same_month_comparison_bounds_and_reject_mismatch(tmp_path, monkeypatch)
         asyncio.run(m.compare('2026-08-10', 'day', '2026-08-11'))
     with pytest.raises(ValueError):
         asyncio.run(m.compare('2026-08-10', 'day', '2026-07-13'))
+
+
+def test_live_traffic_queries_current_day_and_caches_coherent_pair(tmp_path, monkeypatch):
+    start = datetime(2026, 9, 28, tzinfo=TZ)
+    end = start + timedelta(hours=14)
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return end
+    monkeypatch.setattr('monitor.datetime', Clock)
+    m = Monitor(tmp_path, None, '237699011', 'https://example.test')
+    calls = []
+    class Visits:
+        async def get(self, path, params):
+            calls.append(params)
+            return {'user_id': 237699011, 'total_visits': 100,
+                    'date_from': '2026-09-28T00:00:00-04:00',
+                    'date_to': '2026-09-29T00:00:00-04:00'}
+    async def aligned(client, seller, a, b):
+        assert a == '2026-09-28T00:00:00-04:00'
+        assert b == end.isoformat()
+        return [order(1, '2026-09-28T12:00:00-03:00')], 0
+    monkeypatch.setattr('monitor.all_orders', aligned)
+    rows = [order(1, '2026-09-28T12:00:00-03:00'), order(2, '2026-09-28T00:30:00-03:00')]
+    r = asyncio.run(m.traffic(Visits(), rows, start, end))
+    assert calls == [{'date_from': '2026-09-28', 'date_to': '2026-09-29'}]
+    assert r['visits'] == 100 and r['conversion_percent'] == '1'
+    assert r['status'] == 'provisional' and r['refresh_seconds'] == 30
+    r2 = asyncio.run(m.traffic(Visits(), [], start, end+timedelta(seconds=10)))
+    assert len(calls) == 1 and r2['period_end'] == r['period_end']
+    with m.db() as c:
+        c.execute('UPDATE snapshots SET updated_at=0')
+    asyncio.run(m.traffic(Visits(), [], start, end))
+    assert len(calls) == 2
+
+
+def test_verified_skus_group_duplicate_listings_and_preserve_variants():
+    rows = []
+    p = policy()
+    for n, sku in enumerate(['CPNF01NGL', 'CPNF01NGL', 'CPNF01RJM', 'MQNF01NG', 'MQNF01RS'], 1):
+        o = order(n)
+        o['order_items'][0]['item'] = {'id': 'MLA'+str(n), 'seller_sku': sku}
+        rows.append(o)
+    r = summarize(rows, p, DAY)
+    assert [(g['product'],g['units']) for g in r['sold_products']] == [('Cinturones NF',6),('Muñequeras NF',4)]
+    assert len(r['sold_products'][0]['variants']) == 2
+    assert r['sold_products'][0]['variants'][0]['units'] == 4
+    assert r['orders'][0]['items'][0]['product'] == 'Cinturones NF'
+    p['kits'] = {'MLA1:': [{'sku':'CPNF01NGL','quantity':2}]}
+    from profitability import product_mapping
+    assert product_mapping(p, rows[0]['order_items'][0]['item']) == {}
+    p['products'] = {'MLA1:': {'name':'Kit explícito','variant':'L'}}
+    assert product_mapping(p, rows[0]['order_items'][0]['item'])['name'] == 'Kit explícito'

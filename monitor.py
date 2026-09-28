@@ -151,9 +151,9 @@ class Monitor:
             with self.db() as c:
                 cached = c.execute('SELECT body,updated_at FROM snapshots WHERE day=?', (day,)).fetchone()
             cfg = self.config()
-            if not force and cached and time.time() - cached[1] < 300:
+            if not force and cached and time.time() - cached[1] < (30 if target == today else 300):
                 body = json.loads(cached[0])
-                if body['policy_revision'] == cfg['revision'] and body.get('calculation_version') == 2:
+                if body['policy_revision'] == cfg['revision'] and body.get('calculation_version') == 3:
                     return body
             try:
                 client = await self.auto.client()
@@ -168,10 +168,11 @@ class Monitor:
                     ads_error = 'Publicidad no disponible; no se reemplazó por cero.'
                 effective_policy = await self.shipping_policy(client, rows, cfg['policy'])
                 result = summarize(rows, effective_policy, day, ads)
+                result['traffic'] = await self.traffic(client, rows, start, end)
                 result.update(fetched_at=datetime.now(TZ).isoformat(), policy_revision=cfg['revision'],
-                              calculation_version=2,
+                              calculation_version=3,
                               excluded_out_of_range=excluded, ads_error=ads_error, stale=False,
-                              refresh_seconds=300, period_end=end.isoformat())
+                              refresh_seconds=30 if target == today else 300, period_end=end.isoformat())
                 with self.db() as c:
                     c.execute('INSERT OR REPLACE INTO snapshots VALUES(?,?,?)', (day, json.dumps(result), time.time()))
                 return result
@@ -345,52 +346,66 @@ class Monitor:
         sales = len({str(o['id']) for o in rows if o.get('status') == 'paid'
                      and start <= instant(o['date_created']) < end})
         result = {'visits': None, 'paid_orders': sales, 'conversion_percent': None,
-                  'status': 'pending', 'formula': 'Órdenes pagadas / visitas × 100',
+                  'status': 'unavailable', 'formula': 'Órdenes pagadas / visitas × 100',
                   'scope': 'Visitas a publicaciones, no visitantes únicos ni tienda',
                   'official_equivalence_verified': False, 'fetched_at': None}
-        # A daily provider total cannot be used for an intraday comparison.
-        if start.time() != datetime.min.time() or end.time() != datetime.min.time():
-            result['reason'] = 'Visitas disponibles para días completos; elegí un día cerrado.'
+        # The current day's range includes visits accumulated so far. Historical
+        # partial-day comparisons cannot be reconstructed from daily buckets.
+        now = datetime.now(TZ)
+        partial = end.time() != datetime.min.time()
+        live = partial and end.date() == now.date() and abs((now-end).total_seconds()) < 120
+        if start.time() != datetime.min.time() or (partial and not live):
+            result['reason'] = 'La API no ofrece visitas históricas por hora para este corte.'
             return result
-        key = 'traffic:v3:' + start.isoformat() + ':' + end.isoformat()
+        query_end = (end + timedelta(days=1)).date() if live else end.date()
+        ttl = 30 if live else 900
+        key = 'traffic:v4:' + start.isoformat() + ':' + str(query_end) + (':live' if live else ':closed')
         with self.db() as c:
             cached = c.execute('SELECT body,updated_at FROM snapshots WHERE day=?', (key,)).fetchone()
-        if cached and cached[1] > time.time() - 900:
+        if cached and cached[1] > time.time() - ttl:
             result.update(json.loads(cached[0]))
         else:
-            payload = {'visits': None, 'status': 'pending',
+            payload = {'visits': None, 'paid_orders': None, 'status': 'unavailable',
                        'fetched_at': datetime.now(TZ).isoformat()}
             try:
                 data = await asyncio.wait_for(client.get(f'/users/{self.seller}/items_visits', {
                     'date_from': start.date().isoformat(),
-                    'date_to': end.date().isoformat()}), 25)
+                    'date_to': query_end.isoformat()}), 12)
                 payload['provider_shape'] = {'type': type(data).__name__,
                     'keys': sorted(str(k) for k in data)[:20] if isinstance(data, dict) else []}
                 if isinstance(data, dict):
                     payload['provider_range'] = {k: data.get(k) for k in ('date_from', 'date_to')}
-                if (str(data.get('user_id')) != str(self.seller)
+                if (not isinstance(data, dict) or str(data.get('user_id')) != str(self.seller)
                         or type(data.get('total_visits')) is not int or data['total_visits'] < 0):
                     raise ValueError('Respuesta de visitas incompleta o vendedor diferente.')
                 provider_start = datetime.fromisoformat(data['date_from'].replace('Z', '+00:00'))
                 provider_end = datetime.fromisoformat(data['date_to'].replace('Z', '+00:00'))
                 if (provider_start.tzinfo is None or provider_end.tzinfo is None
-                        or provider_start.date() != start.date() or provider_end.date() != end.date()
+                        or provider_start.date() != start.date() or provider_end.date() != query_end
                         or provider_start.time() != datetime.min.time()
                         or provider_end.time() != datetime.min.time()
                         or provider_start.utcoffset() != provider_end.utcoffset()
-                        or provider_end-provider_start != end-start):
+                        or provider_end-provider_start != timedelta(days=(query_end-start.date()).days)):
                     raise ValueError('El período de visitas no coincide con los días solicitados.')
+                provider_boundary = provider_end
+                if live:
+                    provider_end = min(provider_end, end)
+                if provider_start >= provider_end:
+                    raise ValueError('El día de visitas de Mercado Libre todavía no comenzó.')
                 aligned_rows = rows
-                if provider_start != start or provider_end != end:
+                if provider_start < start or provider_end > end:
                     aligned_rows, _ = await all_orders(client, self.seller,
                         provider_start.isoformat(), provider_end.isoformat())
                 aligned_sales = len({str(o['id']) for o in aligned_rows if o.get('status') == 'paid'
                     and provider_start <= instant(o['date_created']) < provider_end})
-                payload.update(visits=data['total_visits'], paid_orders=aligned_sales, status='available',
+                payload.update(visits=data['total_visits'], paid_orders=aligned_sales, status='provisional' if live else 'available',
+                    refresh_seconds=ttl, provider_period_end=provider_boundary.isoformat(),
                     period_start=provider_start.isoformat(), period_end=provider_end.isoformat(),
                     reason='Visitas y ventas alineadas al corte de Mercado Libre ('
                         + provider_start.strftime('UTC%z') + '), distinto del corte financiero argentino.'
                         if provider_start != start else 'Visitas y ventas con el mismo corte horario.')
+                if live:
+                    payload['reason'] += ' Acumulado del día en curso; consulta cada 30 s, sujeto a la demora de Mercado Libre.'
             except Exception as error:
                 payload['error_type'] = type(error).__name__
                 # Do not expose tokens, raw provider payloads or customer data.
@@ -457,7 +472,7 @@ def register(mcp, api, auto, seller, data, env):
 
     @mcp.tool(annotations={'readOnlyHint': True, 'openWorldHint': True})
     async def nf_monitor_resumen(fecha: str) -> dict:
-        """Monitor por día de Argentina, últimos 366 días. Cache 5 minutos; neto nulo si faltan costos/conciliación."""
+        """Monitor por día de Argentina, últimos 366 días. Cache 30 s hoy / 5 min histórico; neto nulo si faltan costos/conciliación."""
         api()
         try:
             return await monitor.snapshot(fecha)
