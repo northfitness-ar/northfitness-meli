@@ -244,7 +244,33 @@ class Monitor:
             c.execute('DELETE FROM shipping_costs WHERE updated_at < ?', (time.time()-86400*370,))
         return enriched
 
-    async def period(self, day, mode='day'):
+    async def cached_orders(self, client, start, end, force=False):
+        """Reuse closed history; only poll the open-day tail every 30 seconds.
+
+        Closed history expires after five minutes so later cancellations are read.
+        Errors propagate; the caller may show a dated, explicitly stale summary.
+        """
+        midnight = datetime.combine(datetime.now(TZ).date(), datetime.min.time(), TZ)
+        ranges = [(start, end)] if not start < midnight < end else [(start, midnight), (midnight, end)]
+        rows, excluded = [], 0
+        for a, b in ranges:
+            query_end = datetime.combine(b.date()+timedelta(days=1),datetime.min.time(),TZ) if b <= midnight and b.time() != datetime.min.time() else b
+            key = 'orders:v1:' + a.isoformat() + ':' + (query_end.isoformat() if b <= midnight else 'live')
+            ttl = 300 if b <= midnight else 30
+            with self.db() as c:
+                cached = c.execute('SELECT body,updated_at FROM snapshots WHERE day=?', (key,)).fetchone()
+            payload = json.loads(cached[0]) if cached and not force and time.time()-cached[1] < ttl else None
+            if payload is None:
+                items, skipped = await all_orders(client, self.seller, a.isoformat(), query_end.isoformat())
+                payload = {'rows': items, 'excluded': skipped}
+                with self.db() as c:
+                    c.execute('INSERT OR REPLACE INTO snapshots VALUES(?,?,?)', (key,json.dumps(payload),time.time()))
+                    c.execute("DELETE FROM snapshots WHERE day LIKE 'orders:v1:%' AND updated_at < ?", (time.time()-86400,))
+            rows.extend(o for o in payload['rows'] if a <= instant(o['date_created']) < b)
+            excluded += payload['excluded']
+        return rows, excluded
+
+    async def period(self, day, mode='day', force=False):
         from datetime import date
         target, now = date.fromisoformat(day), datetime.now(TZ)
         if mode not in ('day', 'week', 'month'):
@@ -258,33 +284,46 @@ class Monitor:
         else:
             stop = start + timedelta(days=7 if mode == 'week' else 1)
         end = min(stop, now)
-        # Shift by whole weeks: same weekdays and identical elapsed duration.
-        shift = timedelta(days=28 if mode == 'month' else 7)
-        key = 'period:v4:' + mode + ':' + day
-        requested_at = time.time()
+        refresh = 30 if end == now else 300
+        key = 'period:v5:' + mode + ':' + day
         async with self.lock:
             cfg = self.config()
             with self.db() as c:
                 cached = c.execute('SELECT body,updated_at FROM snapshots WHERE day=?', (key,)).fetchone()
-            if cached and cached[1] >= requested_at:
+            if cached and not force and time.time()-cached[1] < refresh:
                 shared = json.loads(cached[0])
                 if shared.get('policy_revision') == cfg['revision'] and not shared.get('stale'):
                     return shared
             try:
                 client = await self.auto.client()
-                rows, excluded = await all_orders(client, self.seller, start.isoformat(), end.isoformat())
+                rows, excluded = await self.cached_orders(client, start, end, force)
                 effective_policy = await self.shipping_policy(client, rows, cfg['policy'])
                 result = summarize_period(rows, effective_policy, start, end)
                 result['traffic'] = await self.traffic(client, rows, start, end, live=end == now)
                 result.update(fetched_at=datetime.now(TZ).isoformat(), policy_revision=cfg['revision'],
-                              stale=False, refresh_seconds=30, mode=mode, excluded_out_of_range=excluded)
+                              stale=False, refresh_seconds=refresh, live=end == now, mode=mode, excluded_out_of_range=excluded)
                 try:
-                    previous, _ = await all_orders(client, self.seller, (start-shift).isoformat(), (end-shift).isoformat())
-                    comparison = summarize_period(previous, cfg['policy'], start-shift, end-shift)
-                    current_sales = amount(result['gross']) - amount(result['cancelled'])
+                    shift = timedelta(days=7)
+                    comp_start, comp_end = start, end
+                    if mode == 'month':
+                        from calendar import monthrange
+                        previous_start = (start-timedelta(days=1)).replace(day=1)
+                        common_day = min(target.day, monthrange(previous_start.year, previous_start.month)[1])
+                        comp_end = min(end, start+timedelta(days=common_day))
+                        previous_end = previous_start+(comp_end-start)
+                    else:
+                        previous_start, previous_end = start-shift, end-shift
+                    previous, _ = await self.cached_orders(client, previous_start, previous_end, force)
+                    comparison = summarize_period(previous, cfg['policy'], previous_start, previous_end)
+                    matched = result if comp_end == end else summarize_period(rows, effective_policy, comp_start, comp_end)
+                    current_sales = amount(matched['gross']) - amount(matched['cancelled'])
                     previous_sales = amount(comparison['gross']) - amount(comparison['cancelled'])
-                    result['comparison'] = {'start': (start-shift).isoformat(), 'end': (end-shift).isoformat(),
-                        'sales': str(previous_sales), 'percent': str((current_sales-previous_sales)*100/previous_sales) if previous_sales else None}
+                    result['comparison'] = {'start': previous_start.isoformat(), 'end': previous_end.isoformat(),
+                        'current_start': comp_start.isoformat(), 'current_end': comp_end.isoformat(),
+                        'current_sales': str(current_sales), 'sales': str(previous_sales),
+                        'current_paid_sales': matched['paid_sales'], 'paid_sales': comparison['paid_sales'],
+                        'current_units': matched['sold_units'], 'units': comparison['sold_units'],
+                        'percent': str((current_sales-previous_sales)*100/previous_sales) if previous_sales else None}
                 except Exception:
                     result['comparison'] = None
                 with self.db() as c:
@@ -337,18 +376,31 @@ class Monitor:
                 raise ValueError('No hay días equivalentes disponibles dentro del mes.')
             ranges = ((begin, end), (begin-shift, end-shift))
         async with self.lock:
-            policy = self.config()['policy']
+            cfg = self.config()
+            policy = cfg['policy']
+            cache_key = 'compare:v1:' + ':'.join((day, mode, reference))
+            ttl = 60 if any(b == now for a,b in ranges) else 300
+            with self.db() as c:
+                cached = c.execute('SELECT body,updated_at FROM snapshots WHERE day=?',(cache_key,)).fetchone()
+            if cached and time.time()-cached[1] < ttl:
+                shared = json.loads(cached[0])
+                if shared.get('policy_revision') == cfg['revision']:
+                    return shared
             client = await self.auto.client()
             summaries = []
             for a, b in ranges:
-                rows, _ = await all_orders(client, self.seller, a.isoformat(), b.isoformat())
+                rows, _ = await self.cached_orders(client, a, b)
                 effective = await self.shipping_policy(client, rows, policy)
                 summary = summarize_period(rows, effective, a, b)
                 summary['traffic'] = await self.traffic(client, rows, a, b, live=b == now)
                 summary.pop('orders', None)
                 summaries.append(summary)
-        return {'current': summaries[0], 'reference': summaries[1],
-                'fetched_at': datetime.now(TZ).isoformat()}
+            result = {'current': summaries[0], 'reference': summaries[1],
+                      'policy_revision': cfg['revision'], 'fetched_at': datetime.now(TZ).isoformat()}
+            with self.db() as c:
+                c.execute('INSERT OR REPLACE INTO snapshots VALUES(?,?,?)',(cache_key,json.dumps(result),time.time()))
+                c.execute("DELETE FROM snapshots WHERE day LIKE 'compare:v1:%' AND updated_at < ?",(time.time()-86400,))
+            return result
 
     async def traffic(self, client, rows, start, end, *, live=False):
         """Seller listing visits, isolated from financial calculations and caches.
@@ -579,7 +631,7 @@ def register(mcp, api, auto, seller, data, env):
         if not monitor.authorized(request):
             return JSONResponse({'error': 'Pedí «abrir monitor» en NorthFitness para acceder.'}, status_code=401, headers=HEADERS)
         try:
-            result = await monitor.period(request.query_params.get('date', datetime.now(TZ).date().isoformat()), request.query_params.get('period', 'day'))
+            result = await monitor.period(request.query_params.get('date', datetime.now(TZ).date().isoformat()), request.query_params.get('period', 'day'), force=request.query_params.get('refresh') == '1')
             return JSONResponse(result, headers=HEADERS)
         except ValueError as exc:
             return JSONResponse({'error': str(exc)}, status_code=503, headers=HEADERS)

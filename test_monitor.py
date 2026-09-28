@@ -376,7 +376,7 @@ def test_period_monday_bounds_comparison_and_failed_refresh(tmp_path,monkeypatch
     assert datetime.fromisoformat(calls[0][1])-datetime.fromisoformat(calls[1][1])==timedelta(days=7)
     async def fail(*args):raise RuntimeError('offline')
     monkeypatch.setattr('monitor.all_orders',fail)
-    stale=asyncio.run(m.period(DAY,'week'))
+    stale=asyncio.run(m.period(DAY,'week',force=True))
     assert stale['stale'] and stale['fetched_at']==result['fetched_at']
 
 def test_shipping_pack_cost_once_cached_and_unknown_not_zero(tmp_path):
@@ -408,8 +408,7 @@ def test_month_calendar_boundaries_and_identical_duration(tmp_path,monkeypatch):
     m=Monitor(tmp_path,Auto(),'237699011','https://nf.example');m.configure(management_policy(),0)
     asyncio.run(m.period('2026-08-15','month'))
     assert calls[0]==('2026-08-01T00:00:00-03:00','2026-08-16T00:00:00-03:00')
-    assert datetime.fromisoformat(calls[0][0])-datetime.fromisoformat(calls[1][0])==timedelta(days=28)
-    assert datetime.fromisoformat(calls[0][1])-datetime.fromisoformat(calls[1][1])==timedelta(days=28)
+    assert calls[1]==('2026-07-01T00:00:00-03:00','2026-07-16T00:00:00-03:00')
 
 def test_html_controls_have_script_targets():
     from html.parser import HTMLParser
@@ -622,6 +621,63 @@ def test_month_compare_live_cutoff_same_time(tmp_path,monkeypatch):
     monkeypatch.setattr('monitor.all_orders',read)
     monkeypatch.setattr(Monitor,'traffic',traffic)
     m=Monitor(tmp_path,Auto(),'237699011','https://nf.example')
-    asyncio.run(m.compare('2026-09-28','month','2026-02-28'))
-    assert calls[0][1].isoformat()=='2026-09-28T15:12:00-03:00'
-    assert calls[1][1].isoformat()=='2026-02-28T15:12:00-03:00'
+    result=asyncio.run(m.compare('2026-09-28','month','2026-02-28'))
+    assert result['current']['period_end']=='2026-09-28T15:12:00-03:00'
+    assert result['reference']['period_end']=='2026-02-28T15:12:00-03:00'
+    assert calls[0][1].isoformat()=='2026-09-28T00:00:00-03:00'
+    assert calls[1][1].isoformat()=='2026-09-28T15:12:00-03:00'
+    assert calls[2][1].isoformat()=='2026-03-01T00:00:00-03:00'
+
+
+def test_cached_orders_expires_and_force_reads_cancellations(tmp_path,monkeypatch):
+    calls=[];ticks=[1000.0];cancelled=[False]
+    async def read(client,seller,start,end):
+        calls.append((start,end))
+        return [dict(order(),status='cancelled' if cancelled[0] else 'paid')],0
+    monkeypatch.setattr('monitor.all_orders',read)
+    monkeypatch.setattr('monitor.time.time',lambda:ticks[0])
+    m=Monitor(tmp_path,None,'237699011','https://nf.example')
+    start=datetime(2026,9,17,tzinfo=TZ);end=start+timedelta(hours=15)
+    first=asyncio.run(m.cached_orders(None,start,end))
+    assert len(calls)==1 and calls[0][1].startswith('2026-09-18T00:00:00')
+    cancelled[0]=True
+    cached=asyncio.run(m.cached_orders(None,start,end+timedelta(minutes=1)))
+    assert len(calls)==1 and cached[0][0]['status']=='paid'
+    ticks[0]+=301
+    fresh=asyncio.run(m.cached_orders(None,start,end))
+    assert len(calls)==2 and fresh[0][0]['status']=='cancelled'
+    asyncio.run(m.cached_orders(None,start,end,force=True))
+    assert len(calls)==3
+    # A daily cache must not leak an afternoon sale into the morning comparison.
+    morning=asyncio.run(m.cached_orders(None,start,start+timedelta(hours=8)))
+    assert not morning[0] and len(calls)==3
+
+
+def test_period_cache_reuses_history_and_policy_changes_recalculate(tmp_path,monkeypatch):
+    calls=[]
+    class Auto:
+        async def client(self): return object()
+    async def read(*args): calls.append(args);return [order()],0
+    async def traffic(*args,**kwargs):return {'visits':None}
+    monkeypatch.setattr('monitor.all_orders',read)
+    monkeypatch.setattr(Monitor,'traffic',traffic)
+    m=Monitor(tmp_path,Auto(),'237699011','https://nf.example');m.configure(management_policy(),0)
+    first=asyncio.run(m.period(DAY));count=len(calls)
+    second=asyncio.run(m.period(DAY));assert len(calls)==count and second['fetched_at']==first['fetched_at']
+    changed=management_policy();changed['costs'][0]['unit_cost']='40'
+    m.configure(changed,1)
+    third=asyncio.run(m.period(DAY))
+    assert third['policy_revision']==2 and len(calls)==count
+    assert third['product_profit']!=first['product_profit']
+    asyncio.run(m.period(DAY,force=True));assert len(calls)>count
+
+
+def test_ticket_and_product_profit_are_weighted_and_missing_cost_is_not_zero():
+    from profitability import summarize_period
+    a=order();b=order(2);b['order_items'][0].update(quantity=1,unit_price='200.20')
+    r=summarize_period([a,b],policy(),datetime(2026,9,17,tzinfo=TZ),datetime(2026,9,18,tzinfo=TZ))
+    assert r['average_ticket']=='200.20' and r['units_per_sale']=='1.50'
+    assert r['product_profit']=='280.37'
+    p=policy();p['costs']=[]
+    r=summarize_period([a,b],p,datetime(2026,9,17,tzinfo=TZ),datetime(2026,9,18,tzinfo=TZ))
+    assert r['product_profit'] is None

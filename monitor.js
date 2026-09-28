@@ -4,14 +4,20 @@ const currency=new Intl.NumberFormat('es-AR',{style:'currency',currency:'ARS',ma
 const fmt=value=>value===null||value===undefined?'No disponible':currency.format(Number(value));
 const stamp=value=>{try{return new Intl.DateTimeFormat('es-AR',{timeZone:'America/Argentina/Buenos_Aires',dateStyle:'short',timeStyle:'short'}).format(new Date(value));}catch{return value;}};
 $('day').value=new Intl.DateTimeFormat('en-CA',{timeZone:'America/Argentina/Buenos_Aires',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
-let busy=false, allOrders=[], pageIndex=0, lastSuccess=0, timer=null;
+let busy=false, allOrders=[], pageIndex=0, lastSuccess=0, timer=null, lastData=null, allowedAge=90000, nextRefresh=30000;
+let savedSettings={};try{savedSettings=JSON.parse(localStorage.getItem('nf-monitor-view')||'{}')||{};}catch{}
+if(['day','week','month'].includes(savedSettings.mode))$('period').value=savedSettings.mode;
+if(!savedSettings.followToday&&/^\d{4}-\d{2}-\d{2}$/.test(savedSettings.day||'')&&savedSettings.day<=$('day').value&&Date.parse($('day').value)-Date.parse(savedSettings.day)<=366*86400000)$('day').value=savedSettings.day;
+if(['profit','units','margin_percent'].includes(savedSettings.sort))$('productsort').value=savedSettings.sort;
+function saveSettings(){try{localStorage.setItem('nf-monitor-view',JSON.stringify({day:$('day').value,mode:$('period').value,reference:$('reference').value,sort:$('productsort').value,followToday:$('day').value===today()}));}catch{}}
+function ranked(items){const key=$('productsort').value||'profit';return [...items].sort((a,b)=>a[key]==null?(b[key]==null?0:1):b[key]==null?-1:Number(b[key])-Number(a[key]));}
 function cell(row,value,tag='td'){const el=document.createElement(tag);el.textContent=value;row.append(el);}
 const percent=value=>value===null||value===undefined?'No disponible':Number(value).toLocaleString('es-AR',{maximumFractionDigits:2})+'%';
 function profitCells(row,data){cell(row,percent(data.margin_percent));cell(row,fmt(data.unit_profit));cell(row,fmt(data.profit));}
 function drawProducts(d){
  $('rows').replaceChildren();
- for(const product of d.sold_products||[]){
-  for(const variant of product.variants){const row=document.createElement('tr');cell(row,product.product);cell(row,variant.variant);
+ for(const product of ranked(d.sold_products||[])){
+  for(const variant of ranked(product.variants)){const row=document.createElement('tr');cell(row,product.product);cell(row,variant.variant);
    if(variant.components?.length){const detail=document.createElement('details'),summary=document.createElement('summary');summary.textContent='Componentes';detail.append(summary);for(const part of variant.components){const line=document.createElement('div');line.textContent=part.quantity+' × '+part.sku+' · '+fmt(part.unit_cost);detail.append(line);}row.children[0].append(detail);}cell(row,String(variant.units));cell(row,fmt(variant.sale_price));cell(row,fmt(variant.average_sale_price));cell(row,fmt(variant.unit_cost));cell(row,fmt(variant.total_cost));profitCells(row,variant);$('rows').append(row);}
   const total=document.createElement('tr');total.className='product-total';cell(total,'TOTAL '+product.product,'th');cell(total,'','td');cell(total,String(product.units));cell(total,'—');cell(total,fmt(product.average_sale_price));cell(total,'');cell(total,fmt(product.total_cost));profitCells(total,product);$('rows').append(total);
  }
@@ -33,30 +39,40 @@ function drawOrders(){
 }
 function clock(){
  $('clock').textContent=new Intl.DateTimeFormat('es-AR',{timeZone:'America/Argentina/Buenos_Aires',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}).format(new Date());
- if(lastSuccess && Date.now()-lastSuccess>90000){$('live').textContent='SIN ACTUALIZAR';$('live').className='error';}
+ if(lastSuccess && Date.now()-lastSuccess>allowedAge){$('live').textContent='SIN ACTUALIZAR';$('live').className='error';}
 }
-async function update(){
+async function update(force=false){
  if(busy)return;clearTimeout(timer);busy=true;const startedAt=Date.now(),selectedDay=$('day').value,selectedPeriod=$('period').value;$('refresh').disabled=true;
  try{
-  const response=await fetch('/monitor/data?date='+encodeURIComponent(selectedDay)+'&period='+encodeURIComponent(selectedPeriod),{cache:'no-store'});
+  const response=await fetch('/monitor/data?date='+encodeURIComponent(selectedDay)+'&period='+encodeURIComponent(selectedPeriod)+(force?'&refresh=1':''),{cache:'no-store'});
   const d=await response.json();if(!response.ok)throw new Error(d.error||'No se pudo actualizar.');
   if(selectedDay!==$('day').value||selectedPeriod!==$('period').value)return;
-  if(!d.stale)lastSuccess=Date.parse(d.fetched_at);$('live').textContent=d.stale?'SIN ACTUALIZAR':'LIVE';$('live').className=d.stale?'error':'';
+  lastData=d;nextRefresh=(d.refresh_seconds||30)*1000;allowedAge=nextRefresh+60000;
+  if(!d.stale)lastSuccess=Date.parse(d.fetched_at);$('live').textContent=d.stale?'SIN ACTUALIZAR':d.live===false?'HISTÓRICO':'LIVE';$('live').className=d.stale?'error':'';
   $('range').textContent=stamp(d.period_start)+' — '+stamp(d.period_end);
-  $('comparison').textContent='Comparación detallada disponible en la sección inferior.';
+  $('comparison').textContent='';
+  const c=d.comparison;
+  $('quicktitle').textContent=selectedPeriod==='month'?'Contra el mes anterior, al mismo corte':selectedPeriod==='week'?'Contra la semana anterior, al mismo corte':'Contra el mismo día de la semana anterior';
+  $('quickrevenue').textContent=c?change(c.current_sales,c.sales):'No disponible';$('quicksales').textContent=c?change(c.current_paid_sales,c.paid_sales):'No disponible';$('quickunits').textContent=c?change(c.current_units,c.units):'No disponible';
+  $('quickrange').textContent=c?'Seleccionado: '+stamp(c.current_start)+' — '+stamp(c.current_end)+' · Referencia: '+stamp(c.start)+' — '+stamp(c.end):'No se pudo obtener la referencia.';
   $('state').className=d.stale?'error':'';$('state').textContent=d.stale?'No se pudo actualizar · '+stamp(d.fetched_at):'Última actualización: '+stamp(d.fetched_at);
   $('cancelled').textContent=fmt(d.cancelled);
   const traffic=d.traffic||{};
   $('visits').textContent=traffic.visits==null?'No disponible':number(traffic.visits);$('paidsales').textContent=number(d.paid_sales);$('units').textContent=number(d.sold_units);$('conversion').textContent=traffic.conversion_percent==null?(traffic.visits===0?'Sin visitas':'No disponible'):percent(traffic.conversion_percent);
   $('netsales').textContent=fmt(d.gross==null||d.cancelled==null?null:Number(d.gross)-Number(d.cancelled));
   const estimate=d.management_estimate;$('net').textContent=fmt(estimate?estimate.result:d.net_estimate);
+  $('productprofit').textContent=fmt(d.product_profit);$('ticket').textContent=fmt(d.average_ticket);$('unitsperorder').textContent=number(d.units_per_sale);
+  const adDays=estimate?.ads_included_days??0,totalDays=d.days_count??1;
+  const adScope=adDays===totalDays?'Ads incluidos':adDays===0?'Antes de Ads':'Ads parciales';
+  $('resultscope').textContent=adScope+' · Antes del IVA mensual';
+  $('resultdetails').textContent='Ads incluidos en '+adDays+' de '+totalDays+' días. '+(d.logistics_missing_orders?number(d.logistics_missing_orders)+' ventas con envío sin conciliar. ':'')+'El IVA mensual y los gastos extraordinarios del balance no están incluidos.';
   $('checktax').textContent=fmt(estimate?.check_tax);$('iibb').textContent=fmt(estimate?.iibb);$('fixed').textContent=fmt(d.fixed_costs);$('merchandise').textContent=fmt(d.merchandise_cost);
   $('ads').textContent=d.ads_status==='conciliado'?fmt(d.ads):(d.ads===null?'Pendiente':fmt(d.ads))+' · '+d.ads_missing_days+' día(s) pendiente(s)';
   $('fees').textContent=fmt(d.fees);
   allOrders=d.orders||[];drawOrders();
   drawProducts(d);
  }catch(e){$('state').className='error';$('state').textContent=e.message;$('live').textContent='SIN ACTUALIZAR';$('live').className='error';}
- finally{busy=false;$('refresh').disabled=false;timer=setTimeout(update,(selectedDay!==$('day').value||selectedPeriod!==$('period').value)?0:Math.max(0,30000-(Date.now()-startedAt)));}
+ finally{busy=false;$('refresh').disabled=false;timer=setTimeout(update,(selectedDay!==$('day').value||selectedPeriod!==$('period').value)?0:Math.max(0,nextRefresh-(Date.now()-startedAt)));}
 }
 
 const iso=d=>d.toISOString().slice(0,10);
@@ -82,6 +98,7 @@ function navigation(){
  const previous=candidates.filter(x=>x<day).at(-1);if(previous)$('reference').value=previous;
  $('comparebutton').disabled=!candidates.length;
  $('comparestate').textContent=candidates.length?'Elegí la referencia y pulsá Comparar.':'No hay otro período equivalente disponible.';
+ saveSettings();
 }
 function movePeriod(direction){
  const mode=$('period').value,d=dayDate($('day').value);
@@ -132,7 +149,7 @@ function productComparison(a,b){
  }
 }
 let comparisonRequest=0;
-$('reference').onchange=()=>{$('compareresults').hidden=true;$('compareranges').textContent='';};
+$('reference').onchange=()=>{$('compareresults').hidden=true;$('compareranges').textContent='';saveSettings();};
 $('comparebutton').onclick=async()=>{
  const id=++comparisonRequest,day=$('day').value,mode=$('period').value,reference=$('reference').value;
  $('comparebutton').disabled=true;$('compareresults').hidden=true;$('comparestate').textContent='Consultando ambos períodos…';
@@ -142,7 +159,7 @@ $('comparebutton').onclick=async()=>{
   if(!r.ok)throw new Error(d.error||'No se pudo comparar.');
   const a=d.current,b=d.reference;
   $('compareranges').textContent='Seleccionado: '+stamp(a.period_start)+' — '+stamp(a.period_end)+' | Referencia: '+stamp(b.period_start)+' — '+stamp(b.period_end);
-  metricRows($('comparemetrics'),metrics(a),metrics(b),[['Facturación bruta','sales',fmt],['Cancelaciones','cancelled',fmt],['Ventas','paid_sales',number],['Unidades','sold_units',number],['Visitas a publicaciones','visits',number],['Conversión estimada','conversion_percent',percent,true],['Mercadería','merchandise_cost',fmt],['Comisiones','fees',fmt],['Gastos fijos','fixed_costs',fmt],['Impuesto al cheque','check_tax',fmt],['IIBB','iibb',fmt]]);
+  metricRows($('comparemetrics'),metrics(a),metrics(b),[['Facturación bruta','sales',fmt],['Cancelaciones','cancelled',fmt],['Ventas','paid_sales',number],['Unidades','sold_units',number],['Ticket promedio','average_ticket',fmt],['Unidades por venta','units_per_sale',number],['Visitas a publicaciones','visits',number],['Conversión estimada','conversion_percent',percent,true],['Ganancia de productos','product_profit',fmt],['Mercadería','merchandise_cost',fmt],['Comisiones','fees',fmt],['Gastos fijos','fixed_costs',fmt],['Impuesto al cheque','check_tax',fmt],['IIBB','iibb',fmt]]);
   productComparison(a.sold_products,b.sold_products);$('compareresults').hidden=false;
   $('comparestate').textContent='Actualizado: '+stamp(d.fetched_at);
   for(const row of $('comparemetrics').children){if(['Visitas a publicaciones','Conversión estimada'].includes(row.children[0].textContent)){row.children[1].title=a.traffic?.reason||'';row.children[2].title=b.traffic?.reason||'';}}
@@ -155,4 +172,8 @@ async function init(){
  clock();setInterval(clock,1000);await update();
 }
 $('period').addEventListener('change',()=>{pageIndex=0;navigation();update();});$('search').addEventListener('input',()=>{pageIndex=0;drawOrders();});$('prev').addEventListener('click',()=>{pageIndex--;drawOrders();});$('next').addEventListener('click',()=>{pageIndex++;drawOrders();});
-$('refresh').addEventListener('click',update);$('day').addEventListener('change',()=>{navigation();update();});navigation();init();
+$('productsort').addEventListener('change',()=>{saveSettings();if(lastData)drawProducts(lastData);});
+$('refresh').addEventListener('click',()=>update(true));$('day').addEventListener('change',()=>{navigation();update();});
+navigation();
+if(savedSettings.mode===$('period').value&&savedSettings.day===$('day').value&&[...$('reference').options].some(o=>o.value===savedSettings.reference))$('reference').value=savedSettings.reference;
+saveSettings();init();
