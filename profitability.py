@@ -141,7 +141,16 @@ def sold_products_add(groups, policy, item, qty, stamp, line=None, facts=None, s
     row = group['variants'].setdefault(variant_key, {'variant': variant, 'units': 0,
         'unit_cost': unit if known else None, 'total_cost': ZERO if known else None,
         'components': components if is_kit else [], 'listing_keys': set(),
-        'sales': ZERO, 'profit': ZERO})
+        'sales': ZERO, 'profit': ZERO, 'price_revenue': ZERO,
+        'sale_price': None, 'last_sale_at': None})
+    if line is not None:
+        if row['price_revenue'] is not None:
+            row['price_revenue'] += amount(line['unit_price']) * qty
+        if row['last_sale_at'] is None or stamp >= instant(row['last_sale_at']):
+            row['sale_price'] = money(amount(line['unit_price']))
+            row['last_sale_at'] = stamp.isoformat()
+    else:
+        row['price_revenue'] = None
     # An explicit product/variant map may unify listings only when their computed unit cost agrees.
     if not known:
         row['unit_cost'] = row['total_cost'] = None
@@ -187,7 +196,7 @@ def sold_products_result(groups):
     products, general_units, general_cost, complete = [], 0, ZERO, True
     for group in groups.values():
         variants, product_units, product_cost, product_complete = [], 0, ZERO, True
-        product_sales, product_profit = ZERO, ZERO
+        product_sales, product_profit, price_revenue = ZERO, ZERO, ZERO
         for row in group['variants'].values():
             product_units += row['units']
             if row['total_cost'] is None:
@@ -196,7 +205,10 @@ def sold_products_result(groups):
                 product_cost += row['total_cost']
             product_sales = product_sales + row['sales'] if product_sales is not None and row['sales'] is not None else None
             product_profit = product_profit + row['profit'] if product_profit is not None and row['profit'] is not None else None
-            variants.append({**row, **product_profit_fields(row['sales'], row['profit'], row['units']), 'unit_cost': money(row['unit_cost']),
+            price_revenue = price_revenue + row['price_revenue'] if price_revenue is not None and row['price_revenue'] is not None else None
+            variants.append({**row, 'price_revenue': money(row['price_revenue']),
+                'average_sale_price': money(row['price_revenue'] / row['units']) if row['price_revenue'] is not None and row['units'] else None,
+                **product_profit_fields(row['sales'], row['profit'], row['units']), 'unit_cost': money(row['unit_cost']),
                 'total_cost': money(row['total_cost']), 'listing_keys': sorted(row['listing_keys'])})
         general_units += product_units
         complete = complete and product_complete
@@ -204,6 +216,7 @@ def sold_products_result(groups):
             general_cost += product_cost
         products.append({'product': group['product'], 'variants': variants, 'units': product_units,
                          'total_cost': money(product_cost) if product_complete else None,
+                         'average_sale_price': money(price_revenue / product_units) if price_revenue is not None and product_units else None,
                          **product_profit_fields(product_sales, product_profit, product_units)})
     return products, general_units, money(general_cost) if complete else None
 
@@ -311,7 +324,8 @@ def summarize(orders, policy, day, ads_reported=None):
         entries.append({'id': oid, 'status': status, 'date_created': order['date_created'],
                         'items': [{'product': product_mapping(policy, l['item']).get('name', l['item'].get('title', l['item']['id'])),
                                    'variant': product_mapping(policy, l['item']).get('variant', variant_label(l['item'])),
-                                   'units': l['quantity']} for l in lines],
+                                   'units': l['quantity'], 'sale_price': money(amount(l['unit_price']))} for l in lines],
+                        'average_sale_price': money(revenue / sum(l['quantity'] for l in lines)),
                         'logistics': money(logistics) if 'logistics' in facts else None,
                         'revenue': money(net_revenue),
                         'fee': money(fee) if fee_known else None, 'cogs': money(cogs) if cost_known else None,
@@ -332,7 +346,7 @@ def summarize(orders, policy, day, ads_reported=None):
             'net_estimate': money(net), 'orders_count': len(orders), 'complete_orders': complete_orders,
             'coverage_percent': round(100 * complete_orders / len(orders), 1) if orders else 100,
             'missing': missing, 'orders': entries, 'sold_products': sold_products,
-            'sold_units': sold_units, 'merchandise_cost': merchandise_cost,
+            'sold_units': sold_units, 'paid_sales': sum(o.get('status') == 'paid' for o in orders), 'merchandise_cost': merchandise_cost,
             'status': 'provisorio' if net is not None else 'incompleto',
             'basis': 'ARS con importes de caja; ajuste impositivo conciliado separado. No balance contable ni saldo MP.'}
     estimate = policy.get('management_estimate')
@@ -418,7 +432,8 @@ def summarize_period(orders, policy, start, end):
     return {'day': start.date().isoformat(), 'period_start': start.isoformat(), 'period_end': end.isoformat(),
         'gross': total([r['gross'] for r in results]), 'cancelled': total([r['cancelled'] for r in results]),
         'fixed_costs': total([r['fixed_costs'] for r in results]), 'sold_products': products,
-        'sold_units': units, 'merchandise_cost': cost, 'orders': entries, 'orders_count': len(entries),
+        'sold_units': units, 'paid_sales': sum(o['status'] == 'paid' for o in entries),
+        'merchandise_cost': cost, 'orders': entries, 'orders_count': len(entries),
         'ads': total([daily_facts(policy, day)['ads'] for day in ads_days]) if ads_days else None,
         'ads_status': 'conciliado' if len(ads_days) == len(days) else 'pendiente',
         'ads_missing_days': len(days) - len(ads_days), 'days_count': len(days),

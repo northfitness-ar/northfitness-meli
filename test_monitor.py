@@ -251,7 +251,7 @@ def test_snapshot_recalculates_old_schema_and_matches_period_logistics(tmp_path,
         c.execute('INSERT INTO snapshots VALUES(?,?,?)', (DAY, json.dumps({'policy_revision': 1, 'fetched_at': 'old'}), time.time()))
     daily = asyncio.run(m.snapshot(DAY))
     period = asyncio.run(m.period(DAY))
-    assert daily['calculation_version'] == 3
+    assert daily['calculation_version'] == 4
     assert daily['orders'][0]['logistics'] == '19.00'
     assert daily['management_estimate']['result'] == period['management_estimate']['result']
 
@@ -407,7 +407,7 @@ def test_month_calendar_boundaries_and_identical_duration(tmp_path,monkeypatch):
     monkeypatch.setattr('monitor.all_orders',read)
     m=Monitor(tmp_path,Auto(),'237699011','https://nf.example');m.configure(management_policy(),0)
     asyncio.run(m.period('2026-08-15','month'))
-    assert calls[0]==('2026-08-01T00:00:00-03:00','2026-09-01T00:00:00-03:00')
+    assert calls[0]==('2026-08-01T00:00:00-03:00','2026-08-16T00:00:00-03:00')
     assert datetime.fromisoformat(calls[0][0])-datetime.fromisoformat(calls[1][0])==timedelta(days=28)
     assert datetime.fromisoformat(calls[0][1])-datetime.fromisoformat(calls[1][1])==timedelta(days=28)
 
@@ -562,3 +562,66 @@ def test_traffic_diagnostic_is_bounded_and_aggregate_only(tmp_path):
     assert all(x['date_from'].endswith('-03:00') for x in calls)
     assert all(x['total_visits'] == 844 and 'private' not in x for x in r['probes'])
     assert not r['official_equivalence_verified']
+
+
+def test_sale_prices_weighted_and_last_chronologically():
+    older = order(1, DAY+'T09:00:00-03:00')
+    newer = order(2, DAY+'T10:00:00-03:00')
+    newer['order_items'][0].update(quantity=1, unit_price='200.20')
+    cancelled = copy.deepcopy(newer)
+    cancelled.update(id=3, status='cancelled')
+    cancelled['order_items'][0]['unit_price'] = '999.99'
+    result = summarize([newer, cancelled, older], policy(), DAY)
+    variant = result['sold_products'][0]['variants'][0]
+    assert variant['sale_price'] == '200.20'
+    assert variant['average_sale_price'] == '133.47'
+    assert result['sold_products'][0]['average_sale_price'] == '133.47'
+    assert result['paid_sales'] == 2 and result['sold_units'] == 3
+    assert result['orders'][0]['items'][0]['sale_price'] == '200.20'
+    assert result['orders'][0]['average_sale_price'] == '200.20'
+    assert result['orders'][1]['revenue'] == '0.00'
+    assert result['orders'][1]['average_sale_price'] == '999.99'
+
+
+@pytest.mark.parametrize('target,reference,days',[
+    ('2026-09-27','2026-01-27',27),
+    ('2026-08-31','2026-02-28',28),
+    ('2026-08-31','2026-04-30',30),
+])
+def test_month_compare_equal_calendar_cutoffs(tmp_path, monkeypatch, target, reference, days):
+    calls=[]
+    class Auto:
+        async def client(self): return object()
+    async def read(client,seller,start,end):
+        calls.append((datetime.fromisoformat(start),datetime.fromisoformat(end)))
+        return [],0
+    async def traffic(*args, **kwargs): return {'visits':None,'conversion_percent':None}
+    monkeypatch.setattr('monitor.all_orders',read)
+    monkeypatch.setattr(Monitor,'traffic',traffic)
+    m=Monitor(tmp_path,Auto(),'237699011','https://nf.example')
+    r=asyncio.run(m.compare(target,'month',reference))
+    assert len(calls)==2
+    assert all(a.day==1 and b-a==timedelta(days=days) for a,b in calls)
+    assert r['current']['paid_sales']==0
+    with pytest.raises(ValueError): asyncio.run(m.compare(target,'month',target))
+    with pytest.raises(ValueError): asyncio.run(m.compare(target,'month','2025-12-27'))
+
+
+def test_month_compare_live_cutoff_same_time(tmp_path,monkeypatch):
+    class Clock(datetime):
+        @classmethod
+        def now(cls,tz=None): return cls(2026,9,28,15,12,tzinfo=TZ)
+    class Auto:
+        async def client(self): return object()
+    calls=[]
+    async def read(client,seller,start,end):
+        calls.append((datetime.fromisoformat(start),datetime.fromisoformat(end)))
+        return [],0
+    async def traffic(*args,**kwargs): return {'visits':None,'conversion_percent':None}
+    monkeypatch.setattr('monitor.datetime',Clock)
+    monkeypatch.setattr('monitor.all_orders',read)
+    monkeypatch.setattr(Monitor,'traffic',traffic)
+    m=Monitor(tmp_path,Auto(),'237699011','https://nf.example')
+    asyncio.run(m.compare('2026-09-28','month','2026-02-28'))
+    assert calls[0][1].isoformat()=='2026-09-28T15:12:00-03:00'
+    assert calls[1][1].isoformat()=='2026-02-28T15:12:00-03:00'

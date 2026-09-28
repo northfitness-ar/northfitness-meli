@@ -153,7 +153,7 @@ class Monitor:
             cfg = self.config()
             if not force and cached and time.time() - cached[1] < 300:
                 body = json.loads(cached[0])
-                if body['policy_revision'] == cfg['revision'] and body.get('calculation_version') == 3:
+                if body['policy_revision'] == cfg['revision'] and body.get('calculation_version') == 4:
                     return body
             try:
                 client = await self.auto.client()
@@ -170,7 +170,7 @@ class Monitor:
                 result = summarize(rows, effective_policy, day, ads)
                 result['traffic'] = await self.traffic(client, rows, start, end, live=target == today)
                 result.update(fetched_at=datetime.now(TZ).isoformat(), policy_revision=cfg['revision'],
-                              calculation_version=3,
+                              calculation_version=4,
                               excluded_out_of_range=excluded, ads_error=ads_error, stale=False,
                               refresh_seconds=300, period_end=end.isoformat())
                 with self.db() as c:
@@ -254,13 +254,13 @@ class Monitor:
         first = target if mode == 'day' else target - timedelta(days=target.weekday()) if mode == 'week' else target.replace(day=1)
         start = datetime.combine(first, datetime.min.time(), TZ)
         if mode == 'month':
-            stop = (start.replace(day=28) + timedelta(days=4)).replace(day=1)
+            stop = datetime.combine(target + timedelta(days=1), datetime.min.time(), TZ)
         else:
             stop = start + timedelta(days=7 if mode == 'week' else 1)
         end = min(stop, now)
         # Shift by whole weeks: same weekdays and identical elapsed duration.
         shift = timedelta(days=28 if mode == 'month' else 7)
-        key = 'period:' + mode + ':' + first.isoformat()
+        key = 'period:v4:' + mode + ':' + day
         requested_at = time.time()
         async with self.lock:
             cfg = self.config()
@@ -302,31 +302,45 @@ class Monitor:
         from datetime import date
         target, base = date.fromisoformat(day), date.fromisoformat(reference)
         now = datetime.now(TZ)
-        if mode not in ('day', 'week'):
-            raise ValueError('Elegí vista diaria o semanal para comparar días equivalentes.')
-        if (target.year, target.month) != (base.year, base.month) or target.weekday() != base.weekday() or target == base:
+        if mode not in ('day', 'week', 'month'):
+            raise ValueError('Elegí vista diaria, semanal o mensual.')
+        if mode != 'month' and ((target.year, target.month) != (base.year, base.month) or target.weekday() != base.weekday() or target == base):
             raise ValueError('Elegí otro día de la misma semana y del mismo mes.')
         if not now.date() - timedelta(days=366) <= min(target, base) <= max(target, base) <= now.date():
             raise ValueError('Fecha fuera del período disponible.')
-        start = datetime.combine(target, datetime.min.time(), TZ)
-        other = datetime.combine(base, datetime.min.time(), TZ)
-        if mode == 'week':
-            start -= timedelta(days=target.weekday())
-            other -= timedelta(days=base.weekday())
-        shift = start - other
-        month_start = datetime(target.year, target.month, 1, tzinfo=TZ)
-        month_end = (month_start.replace(day=28) + timedelta(days=4)).replace(day=1)
-        # Intersection retains only matched weekdays inside the selected month.
-        begin = max(start, month_start, month_start + shift)
-        end = min(start + timedelta(days=7 if mode == 'week' else 1),
-                  month_end, month_end + shift, now, now + shift)
-        if begin >= end:
-            raise ValueError('No hay días equivalentes disponibles dentro del mes.')
+        if mode == 'month':
+            from calendar import monthrange
+            if base.year != target.year or base.month >= target.month:
+                raise ValueError('Elegí un mes anterior del mismo año, desde enero.')
+            cutoff_day = min(target.day, monthrange(base.year, base.month)[1])
+            begin = datetime(target.year, target.month, 1, tzinfo=TZ)
+            other = datetime(base.year, base.month, 1, tzinfo=TZ)
+            elapsed = timedelta(days=cutoff_day)
+            if target == now.date() and cutoff_day == target.day:
+                elapsed = now - begin
+            end, other_end = begin + elapsed, other + elapsed
+            ranges = ((begin, end), (other, other_end))
+        else:
+            start = datetime.combine(target, datetime.min.time(), TZ)
+            other = datetime.combine(base, datetime.min.time(), TZ)
+            if mode == 'week':
+                start -= timedelta(days=target.weekday())
+                other -= timedelta(days=base.weekday())
+            shift = start - other
+            month_start = datetime(target.year, target.month, 1, tzinfo=TZ)
+            month_end = (month_start.replace(day=28) + timedelta(days=4)).replace(day=1)
+            # Intersection retains only matched weekdays inside the selected month.
+            begin = max(start, month_start, month_start + shift)
+            end = min(start + timedelta(days=7 if mode == 'week' else 1),
+                      month_end, month_end + shift, now, now + shift)
+            if begin >= end:
+                raise ValueError('No hay días equivalentes disponibles dentro del mes.')
+            ranges = ((begin, end), (begin-shift, end-shift))
         async with self.lock:
             policy = self.config()['policy']
             client = await self.auto.client()
             summaries = []
-            for a, b in ((begin, end), (begin-shift, end-shift)):
+            for a, b in ranges:
                 rows, _ = await all_orders(client, self.seller, a.isoformat(), b.isoformat())
                 effective = await self.shipping_policy(client, rows, policy)
                 summary = summarize_period(rows, effective, a, b)
