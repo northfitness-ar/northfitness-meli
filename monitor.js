@@ -45,14 +45,14 @@ async function update(){
   $('range').textContent=stamp(d.period_start)+' — '+stamp(d.period_end);
   $('comparison').textContent='Comparación detallada disponible en la sección inferior.';
   $('state').className=d.stale?'error':'';$('state').textContent=d.stale?'No se pudo actualizar · '+stamp(d.fetched_at):'Última actualización: '+stamp(d.fetched_at);
-  $('gross').textContent=fmt(d.gross);$('cancelled').textContent=fmt(d.cancelled);
+  $('cancelled').textContent=fmt(d.cancelled);
   const traffic=d.traffic||{};
   $('visits').textContent=traffic.visits==null?'No disponible':number(traffic.visits);$('paidsales').textContent=number(d.paid_sales);$('units').textContent=number(d.sold_units);$('conversion').textContent=traffic.conversion_percent==null?(traffic.visits===0?'Sin visitas':'No disponible'):percent(traffic.conversion_percent);
   $('netsales').textContent=fmt(d.gross==null||d.cancelled==null?null:Number(d.gross)-Number(d.cancelled));
   const estimate=d.management_estimate;$('net').textContent=fmt(estimate?estimate.result:d.net_estimate);
   $('checktax').textContent=fmt(estimate?.check_tax);$('iibb').textContent=fmt(estimate?.iibb);$('fixed').textContent=fmt(d.fixed_costs);$('merchandise').textContent=fmt(d.merchandise_cost);
   $('ads').textContent=d.ads_status==='conciliado'?fmt(d.ads):(d.ads===null?'Pendiente':fmt(d.ads))+' · '+d.ads_missing_days+' día(s) pendiente(s)';
-  $('fees').textContent=fmt(d.fees);$('logistics').textContent=fmt(d.logistics_known);$('logisticsstate').textContent=d.logistics_missing_orders?d.logistics_missing_orders+' ventas sin logística registrada':'';
+  $('fees').textContent=fmt(d.fees);
   allOrders=d.orders||[];drawOrders();
   drawProducts(d);
  }catch(e){$('state').className='error';$('state').textContent=e.message;$('live').textContent='SIN ACTUALIZAR';$('live').className='error';}
@@ -142,7 +142,7 @@ $('comparebutton').onclick=async()=>{
   if(!r.ok)throw new Error(d.error||'No se pudo comparar.');
   const a=d.current,b=d.reference;
   $('compareranges').textContent='Seleccionado: '+stamp(a.period_start)+' — '+stamp(a.period_end)+' | Referencia: '+stamp(b.period_start)+' — '+stamp(b.period_end);
-  metricRows($('comparemetrics'),metrics(a),metrics(b),[['Facturación sin cancelaciones','sales',fmt],['Facturación bruta (incluye cancelaciones)','gross',fmt],['Cancelaciones','cancelled',fmt],['Ventas','paid_sales',number],['Unidades','sold_units',number],['Visitas a publicaciones','visits',number],['Conversión estimada','conversion_percent',percent,true],['Mercadería','merchandise_cost',fmt],['Comisiones','fees',fmt],['Gastos fijos','fixed_costs',fmt],['Impuesto al cheque','check_tax',fmt],['IIBB','iibb',fmt]]);
+  metricRows($('comparemetrics'),metrics(a),metrics(b),[['Facturación bruta','sales',fmt],['Cancelaciones','cancelled',fmt],['Ventas','paid_sales',number],['Unidades','sold_units',number],['Visitas a publicaciones','visits',number],['Conversión estimada','conversion_percent',percent,true],['Mercadería','merchandise_cost',fmt],['Comisiones','fees',fmt],['Gastos fijos','fixed_costs',fmt],['Impuesto al cheque','check_tax',fmt],['IIBB','iibb',fmt]]);
   productComparison(a.sold_products,b.sold_products);$('compareresults').hidden=false;
   $('comparestate').textContent='Actualizado: '+stamp(d.fetched_at);
   for(const row of $('comparemetrics').children){if(['Visitas a publicaciones','Conversión estimada'].includes(row.children[0].textContent)){row.children[1].title=a.traffic?.reason||'';row.children[2].title=b.traffic?.reason||'';}}

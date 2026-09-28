@@ -29,7 +29,7 @@ vm.runInContext(fs.readFileSync('monitor.js','utf8').replace('navigation();init(
  assert.equal(ids.rows.children[0].children.length,10);assert.equal(ids.orders.children[0].children.length,11);
  response={current:sample,reference:{...sample,traffic:{visits:null,conversion_percent:null,reason:'Sin corte histórico'}},fetched_at:sample.fetched_at};
  await ids.comparebutton.onclick();
- assert.equal(ids.comparemetrics.children[0].children[0].textContent,'Facturación sin cancelaciones');
+ assert.equal(ids.comparemetrics.children[0].children[0].textContent,'Facturación bruta');
  const labels=ids.comparemetrics.children.map(r=>r.children[0].textContent).join(' ');
  assert.doesNotMatch(labels,/Ads|Logística|Órdenes/);
  const visits=ids.comparemetrics.children.find(r=>r.children[0].textContent==='Visitas a publicaciones');
