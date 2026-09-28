@@ -1,6 +1,9 @@
 'use strict';
 const $=id=>document.getElementById(id);
 const currency=new Intl.NumberFormat('es-AR',{style:'currency',currency:'ARS',maximumFractionDigits:2});
+const summaryCurrency=new Intl.NumberFormat('es-AR',{style:'currency',currency:'ARS',maximumFractionDigits:0});
+const summaryFmt=value=>value===null||value===undefined?'No disponible':summaryCurrency.format(Number(value));
+const expandedProducts=new Set();
 const fmt=value=>value===null||value===undefined?'No disponible':currency.format(Number(value));
 const stamp=value=>{try{return new Intl.DateTimeFormat('es-AR',{timeZone:'America/Argentina/Buenos_Aires',dateStyle:'short',timeStyle:'short'}).format(new Date(value));}catch{return value;}};
 $('day').value=new Intl.DateTimeFormat('en-CA',{timeZone:'America/Argentina/Buenos_Aires',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
@@ -12,14 +15,21 @@ if(['profit','units','margin_percent'].includes(savedSettings.sort))$('productso
 function saveSettings(){try{localStorage.setItem('nf-monitor-view',JSON.stringify({day:$('day').value,mode:$('period').value,reference:$('reference').value,sort:$('productsort').value,followToday:$('day').value===today()}));}catch{}}
 function ranked(items){const key=$('productsort').value||'profit';return [...items].sort((a,b)=>a[key]==null?(b[key]==null?0:1):b[key]==null?-1:Number(b[key])-Number(a[key]));}
 function cell(row,value,tag='td'){const el=document.createElement(tag);el.textContent=value;row.append(el);}
-const percent=value=>value===null||value===undefined?'No disponible':Number(value).toLocaleString('es-AR',{maximumFractionDigits:2})+'%';
+const percent=value=>value===null||value===undefined?'No disponible':Number(value).toLocaleString('es-AR',{maximumFractionDigits:1})+'%';
 function profitCells(row,data){cell(row,percent(data.margin_percent));cell(row,fmt(data.unit_profit));cell(row,fmt(data.profit));}
 function drawProducts(d){
  $('rows').replaceChildren();
  for(const product of ranked(d.sold_products||[])){
-  for(const variant of ranked(product.variants)){const row=document.createElement('tr');cell(row,product.product);cell(row,variant.variant);
-   if(variant.components?.length){const detail=document.createElement('details'),summary=document.createElement('summary');summary.textContent='Componentes';detail.append(summary);for(const part of variant.components){const line=document.createElement('div');line.textContent=part.quantity+' × '+part.sku+' · '+fmt(part.unit_cost);detail.append(line);}row.children[0].append(detail);}cell(row,String(variant.units));cell(row,fmt(variant.sale_price));cell(row,fmt(variant.average_sale_price));cell(row,fmt(variant.unit_cost));cell(row,fmt(variant.total_cost));profitCells(row,variant);$('rows').append(row);}
-  const total=document.createElement('tr');total.className='product-total';cell(total,'TOTAL '+product.product,'th');cell(total,'','td');cell(total,String(product.units));cell(total,'—');cell(total,fmt(product.average_sale_price));cell(total,'');cell(total,fmt(product.total_cost));profitCells(total,product);$('rows').append(total);
+  const key=productKey(product),variantRows=[],total=document.createElement('tr');total.className='product-total';
+  const heading=document.createElement('th'),toggle=document.createElement('button');toggle.className='product-toggle';
+  const label=()=>{toggle.textContent=(expandedProducts.has(key)?'▾ ':'▸ ')+product.product;toggle.setAttribute('aria-expanded',String(expandedProducts.has(key)));};label();heading.append(toggle);total.append(heading);
+  cell(total,product.variants.length+' variante'+(product.variants.length===1?'':'s'));cell(total,String(product.units));cell(total,'—');cell(total,fmt(product.average_sale_price));cell(total,'');cell(total,fmt(product.total_cost));profitCells(total,product);$('rows').append(total);
+  for(const variant of ranked(product.variants)){
+   const row=document.createElement('tr');row.className='variant-row';row.hidden=!expandedProducts.has(key);cell(row,product.product);cell(row,variant.variant);
+   if(variant.components?.length){const detail=document.createElement('details'),summary=document.createElement('summary');summary.textContent='Componentes';detail.append(summary);for(const part of variant.components){const line=document.createElement('div');line.textContent=part.quantity+' × '+part.sku+' · '+fmt(part.unit_cost);detail.append(line);}row.children[0].append(detail);}
+   cell(row,String(variant.units));cell(row,fmt(variant.sale_price));cell(row,fmt(variant.average_sale_price));cell(row,fmt(variant.unit_cost));cell(row,fmt(variant.total_cost));profitCells(row,variant);variantRows.push(row);$('rows').append(row);
+  }
+  toggle.onclick=()=>{if(expandedProducts.has(key))expandedProducts.delete(key);else expandedProducts.add(key);for(const row of variantRows)row.hidden=!expandedProducts.has(key);label();};
  }
  if(!(d.sold_products||[]).length){const row=document.createElement('tr');const empty=document.createElement('td');empty.colSpan=10;empty.textContent='Sin ventas pagadas para esta fecha.';row.append(empty);$('rows').append(row);}
  $('totalunits').textContent=String(d.sold_units??0);$('totalmerchandise').textContent=fmt(d.merchandise_cost);
@@ -56,19 +66,19 @@ async function update(force=false){
   $('quickrevenue').textContent=c?change(c.current_sales,c.sales):'No disponible';$('quicksales').textContent=c?change(c.current_paid_sales,c.paid_sales):'No disponible';$('quickunits').textContent=c?change(c.current_units,c.units):'No disponible';
   $('quickrange').textContent=c?'Seleccionado: '+stamp(c.current_start)+' — '+stamp(c.current_end)+' · Referencia: '+stamp(c.start)+' — '+stamp(c.end):'No se pudo obtener la referencia.';
   $('state').className=d.stale?'error':'';$('state').textContent=d.stale?'No se pudo actualizar · '+stamp(d.fetched_at):'Última actualización: '+stamp(d.fetched_at);
-  $('cancelled').textContent=fmt(d.cancelled);
+  $('cancelled').textContent=summaryFmt(d.cancelled);
   const traffic=d.traffic||{};
   $('visits').textContent=traffic.visits==null?'No disponible':number(traffic.visits);$('paidsales').textContent=number(d.paid_sales);$('units').textContent=number(d.sold_units);$('conversion').textContent=traffic.conversion_percent==null?(traffic.visits===0?'Sin visitas':'No disponible'):percent(traffic.conversion_percent);
-  $('netsales').textContent=fmt(d.gross==null||d.cancelled==null?null:Number(d.gross)-Number(d.cancelled));
-  const estimate=d.management_estimate;$('net').textContent=fmt(estimate?estimate.result:d.net_estimate);
-  $('productprofit').textContent=fmt(d.product_profit);$('ticket').textContent=fmt(d.average_ticket);$('unitsperorder').textContent=number(d.units_per_sale);
+  $('netsales').textContent=summaryFmt(d.gross==null||d.cancelled==null?null:Number(d.gross)-Number(d.cancelled));
+  const estimate=d.management_estimate;$('net').textContent=summaryFmt(estimate?estimate.result:d.net_estimate);
+  $('productprofit').textContent=summaryFmt(d.product_profit);$('ticket').textContent=summaryFmt(d.average_ticket);$('unitsperorder').textContent=number(d.units_per_sale);
   const adDays=estimate?.ads_included_days??0,totalDays=d.days_count??1;
   const adScope=adDays===totalDays?'Ads incluidos':adDays===0?'Antes de Ads':'Ads parciales';
   $('resultscope').textContent=adScope+' · Antes del IVA mensual';
   $('resultdetails').textContent='Ads incluidos en '+adDays+' de '+totalDays+' días. '+(d.logistics_missing_orders?number(d.logistics_missing_orders)+' ventas con envío sin conciliar. ':'')+'El IVA mensual y los gastos extraordinarios del balance no están incluidos.';
-  $('checktax').textContent=fmt(estimate?.check_tax);$('iibb').textContent=fmt(estimate?.iibb);$('fixed').textContent=fmt(d.fixed_costs);$('merchandise').textContent=fmt(d.merchandise_cost);
-  $('ads').textContent=d.ads_status==='conciliado'?fmt(d.ads):(d.ads===null?'Pendiente':fmt(d.ads))+' · '+d.ads_missing_days+' día(s) pendiente(s)';
-  $('fees').textContent=fmt(d.fees);
+  $('checktax').textContent=summaryFmt(estimate?.check_tax);$('iibb').textContent=summaryFmt(estimate?.iibb);$('fixed').textContent=summaryFmt(d.fixed_costs);$('merchandise').textContent=summaryFmt(d.merchandise_cost);
+  $('ads').textContent=d.ads_status==='conciliado'?summaryFmt(d.ads):(d.ads===null?'Pendiente':summaryFmt(d.ads))+' · '+d.ads_missing_days+' día(s) pendiente(s)';
+  $('fees').textContent=summaryFmt(d.fees);
   allOrders=d.orders||[];drawOrders();
   drawProducts(d);
  }catch(e){$('state').className='error';$('state').textContent=e.message;$('live').textContent='SIN ACTUALIZAR';$('live').className='error';}

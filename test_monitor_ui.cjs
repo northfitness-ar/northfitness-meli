@@ -5,6 +5,7 @@ class Element {
  append(...nodes){this.children.push(...nodes);}
  replaceChildren(...nodes){this.children=[...nodes];}
  prepend(...nodes){this.children.unshift(...nodes);}
+ setAttribute(k,v){this[k]=v;}
  addEventListener(){}
  get options(){return this.children;}
 }
@@ -34,8 +35,12 @@ vm.runInContext(fs.readFileSync('monitor.js','utf8').replace('saveSettings();ini
  ids.productsort.value='units';assert.equal(vm.runInContext("ranked([{profit:null,units:10},{profit:20,units:2},{profit:100,units:1}])[0].units",context),10);
  ids.reference.value='2026-02-28';vm.runInContext('saveSettings()',context);
  assert.equal(JSON.parse(preferences.get('nf-monitor-view')).sort,'units');assert.equal(JSON.parse(preferences.get('nf-monitor-view')).reference,'2026-02-28');
- assert.match(ids.netsales.textContent,/2\.418\.260,00/);
- assert.equal(ids.rows.children[0].children.length,10);assert.equal(ids.orders.children[0].children.length,11);
+ assert.match(ids.netsales.textContent,/2\.418\.260/);
+ assert.equal(ids.rows.children[0].children.length,10);
+ assert.equal(ids.rows.children[1].hidden,true);
+ ids.rows.children[0].children[0].children[0].onclick();assert.equal(ids.rows.children[1].hidden,false);
+ vm.runInContext('drawProducts(lastData)',context);assert.equal(ids.rows.children[1].hidden,false);
+ assert.match(ids.rows.children[1].children[3].textContent,/200,20/);assert.equal(ids.orders.children[0].children.length,11);
  response={current:sample,reference:{...sample,traffic:{visits:null,conversion_percent:null,reason:'Sin corte histórico'}},fetched_at:sample.fetched_at};
  await ids.comparebutton.onclick();
  assert.equal(ids.comparemetrics.children[0].children[0].textContent,'Facturación bruta');
