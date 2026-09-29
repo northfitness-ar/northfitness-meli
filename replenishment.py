@@ -38,6 +38,8 @@ def validate(data):
 
 async def plan(client,seller,data):
     validate(data)
+    if data.get('purchase_orders') or any(r.get('estimated') for r in data['stock']):
+        return {'complete':False,'recommendations':[], 'reason':'Usar Stock y reposición del monitor: contiene pedidos por estado y conteos estimados que este planificador anterior no concilia.'}
     now=datetime.now(TZ)
     if now-datetime.fromisoformat(data['as_of'])>timedelta(hours=48):
         raise ValueError('Inventario de más de 48 horas: actualizar antes de recomendar compras.')
