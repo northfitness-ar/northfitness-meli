@@ -1004,6 +1004,8 @@ def build_app(env=None):
 
     from monitor import register as register_monitor, install as install_monitor
     monitor = register_monitor(mcp, api, auto, seller, data, env)
+    from full_tools import register as register_full
+    register_full(mcp, api, seller, monitor)
 
     @mcp.custom_route('/support/oauth/callback', methods=['GET'])
     async def support_callback(request):
