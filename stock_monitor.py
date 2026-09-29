@@ -272,15 +272,20 @@ class StockMonitor:
             # or alter warehouse balances merely because a Full quantity increased.
             reception_key='stock_full_receptions_v1'
             receptions=self.m.auto.get(reception_key,{})
-            if force or time.time()-receptions.get('time',0)>300:
+            if (force or time.time()-receptions.get('time',0)>300 or (receptions.get('data',{}).get('error') and 'error_code' not in receptions.get('data',{}))) and not receptions.get('blocked'):
                 try:
                     ids=set(used)
                     value=await operations_page(client,self.m.seller,ids,
                         (today-timedelta(days=7)).isoformat(),(today+timedelta(days=1)).isoformat(),
                         kind='INBOUND_RECEPTION') if ids else {'complete':False,'results':[],'error':'Sin inventarios Full verificados.'}
-                except Exception:
-                    value={'complete':False,'results':[],'error':'Movimientos Full no disponibles; no interpretar como ausencia de ingresos.'}
-                receptions={'time':time.time(),'data':value};self.m.auto.put(reception_key,receptions)
+                except Exception as exc:
+                    match=re.search(r'HTTP (\d{3})',str(exc))
+                    status=int(match.group(1)) if match else None
+                    value={'complete':False,'results':[],'error':'Movimientos Full no disponibles; no interpretar como ausencia de ingresos.',
+                           'http_status':status,'error_code':'provider_http_'+str(status) if status else 'response_contract',
+                           'diagnostic':str(exc) if str(exc) in ('Respuesta incompleta de movimientos Full.','Movimiento ajeno o inventario inconsistente.','El proveedor no respetó el filtro de operaciones.') else None,
+                           'retry_allowed':status not in (401,403)}
+                receptions={'time':time.time(),'data':value,'blocked':value.get('http_status') in (401,403)};self.m.auto.put(reception_key,receptions)
             result={'rows':results,'pending':pending,'revision':revision,'as_of':now.isoformat(),
                 'email_ready':self.mail_ready(),'email_state':self.m.auto.get('stock_mail_status','Sin envíos'),
                 'missing_listings':sorted(missing),'full_errors':full_errors,

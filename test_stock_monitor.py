@@ -105,3 +105,16 @@ def test_collection_validation_and_future_purchase_not_physical(tmp_path):
     with pytest.raises(ValueError):validate(data)
     data['full_collections'][0]['status']='reserved'
     validate(data)
+
+def test_full_operation_denial_has_diagnostic_and_stops_retries(tmp_path):
+    from fastmcp.exceptions import ToolError
+    s,o,c=setup(tmp_path);original=c.get;calls=[]
+    async def get(path,params=None):
+        if path=='/stock/fulfillment/operations/search':
+            calls.append(path);raise ToolError('Mercado Libre devolvió HTTP 403. Datos no disponibles; no interpretar como cero.')
+        return await original(path,params)
+    c.get=get
+    d=asyncio.run(s.read());assert d['full_receptions']['http_status']==403
+    assert d['full_receptions']['retry_allowed'] is False
+    assert d['rows'][0]['full']==5
+    asyncio.run(s.read(True));assert len(calls)==1
