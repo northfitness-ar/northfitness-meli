@@ -81,16 +81,18 @@
  <div class="stock-heading"><h2>Stock y reposición</h2><button id="stockrefresh" type="button">Actualizar stock</button></div>
  <p id="stockstatus" role="status">Consultando inventario…</p>
  <p id="stockemail"></p>
- <div class="tablewrap"><table><thead><tr><th>Producto / variante</th><th>Full</th><th>Depósito disponible</th><th>Días en Full</th><th>Días de stock total</th><th>Acción</th></tr></thead><tbody id="stockrows"></tbody></table></div>
- <p class="tablehint">Barras con escala común de 90 días; el número muestra la cobertura completa. Total disponible = Full + depósito libre. Fabricación y tránsito se muestran aparte. El conteo estimado puede requerir conciliación.</p>
+ <div class="tablewrap"><table><thead><tr><th>Producto / variante</th><th>Full</th><th>Depósito físico / libre</th><th>Días en Full</th><th>Días de stock total</th><th>Acción</th></tr></thead><tbody id="stockrows"></tbody></table></div>
+ <p class="tablehint">Barras con escala común de 90 días; el número muestra la cobertura completa. Stock total = Full disponible + depósito físico, incluidos los pares reservados que todavía no retiraron. Fabricación y tránsito se muestran aparte. El conteo estimado puede requerir conciliación.</p>
+ <details open><summary>Colectas Full y reservas</summary><p id="stockfullaccess"></p><div class="tablewrap"><table><thead><tr><th>Colecta / origen</th><th>Fecha</th><th>Producto / variante</th><th>Reservado en depósito</th><th>Despachado / por conciliar</th><th>Estado</th></tr></thead><tbody id="stockcollections"></tbody></table></div><p id="stockreceptions"></p></details>
  <details><summary>Pedidos pendientes y mercadería en tránsito</summary><div class="tablewrap"><table><thead><tr><th>Pedido</th><th>Estado</th><th>Producto / variante</th><th>Pendiente</th><th>Llegada estimada</th></tr></thead><tbody id="stockpending"></tbody></table></div></details>
  <details><summary>Registrar movimiento del depósito</summary>
- <p>Ingresos, ventas fuera de ML, envíos a Full o conteo físico. Las ventas de ML se descuentan automáticamente. Enviar a Full reduce el depósito; Full aumenta cuando ML habilita las unidades.</p>
+ <p>Ingresos, ventas fuera de ML, envíos a Full o conteo físico. Las ventas de ML se descuentan automáticamente. Despachar stock libre reduce el depósito. Para unidades ya reservadas elegí «Despachar colecta reservada»: no se descuentan otra vez del libre. Full aumenta únicamente cuando ML habilita las unidades.</p>
  <form id="stockform" class="stock-form">
  <label>Producto / variante<select id="stocksku" required></select></label>
- <label>Movimiento<select id="stockkind"><option value="receive">Ingreso al depósito</option><option value="sale">Salida / venta fuera de ML</option><option value="transfer">Despacho a Full</option><option value="count">Fijar conteo físico disponible</option></select></label>
+ <label>Movimiento<select id="stockkind"><option value="receive">Ingreso al depósito</option><option value="sale">Salida / venta fuera de ML</option><option value="transfer">Despacho a Full desde stock libre</option><option value="collection_dispatch">Despachar colecta reservada</option><option value="count">Fijar conteo físico disponible</option></select></label>
  <label>Cantidad<input id="stockqty" type="number" min="0" max="100000" step="1" required></label>
  <label>Pedido recibido (solo ingresos)<select id="stockpurchase"><option value="">Sin pedido asociado</option></select></label>
+ <label>Colecta reservada (solo su despacho)<select id="stockcollection"><option value="">Elegir colecta</option></select></label>
  <label>Motivo / comprobante<input id="stocknote" minlength="3" maxlength="300" required placeholder="Ej.: recepción UPS, conteo de Maxi"></label>
  <button id="stocksave" type="submit">Guardar movimiento</button>
  </form><p id="stockmovestatus" role="status"></p>
