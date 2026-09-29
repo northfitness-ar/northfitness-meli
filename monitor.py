@@ -558,6 +558,10 @@ def register(mcp, api, auto, seller, data, env):
         try:
             result = copy.deepcopy(await monitor.snapshot(fecha))
             try:
+                result['inventory'] = await monitor.stock.read()
+            except Exception:
+                result['inventory'] = {'error': 'Stock no disponible; reintentar.'}
+            try:
                 result['traffic_diagnostic'] = await monitor.diagnose_traffic(fecha)
             except Exception:
                 result['traffic_diagnostic'] = {'status': 'unavailable'}
@@ -579,7 +583,7 @@ def register(mcp, api, auto, seller, data, env):
     async def asset(request):
         from starlette.responses import Response
         name = request.path_params['name']
-        if name not in ('monitor.js', 'monitor.css', 'monitor-login.js', 'monitor-login.css', 'northfitness-logo.jpg', 'apple-touch-icon.png'):
+        if name not in ('monitor.js', 'stock-monitor.js', 'monitor.css', 'monitor-login.js', 'monitor-login.css', 'northfitness-logo.jpg', 'apple-touch-icon.png'):
             return Response(status_code=404)
         path = Path(__file__).parent / name
         if name.endswith(('.jpg', '.png')):
@@ -675,6 +679,8 @@ def register(mcp, api, auto, seller, data, env):
         except Exception:
             return JSONResponse({'error': 'No se pudo consultar la comparación. Reintentá.'}, status_code=503, headers=HEADERS)
 
+    from stock_monitor import register as register_stock
+    register_stock(mcp, monitor, env, HEADERS)
     return monitor
 
 
@@ -686,10 +692,14 @@ def install(app, monitor, enabled):
     async def lifespan(app):
         async with original(app):
             task = asyncio.create_task(monitor.run())
+            stock_task = asyncio.create_task(monitor.stock.run())
             try:
                 yield
             finally:
                 task.cancel()
+                stock_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await stock_task
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
     app.router.lifespan_context = lifespan
