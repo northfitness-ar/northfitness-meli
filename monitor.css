@@ -18,3 +18,19 @@ main>section.cards{grid-template-columns:1.2fr 1.2fr .85fr;gap:16px}.cards artic
 @media(max-width:1100px){.activity{grid-template-columns:repeat(3,minmax(0,1fr))}.activity article:nth-child(3){border-right:0}.activity article:nth-child(-n+3){border-bottom:1px solid #eceef2}.controls{flex-wrap:wrap;max-width:350px}.cards article{padding:20px}.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:700px){main{padding:0 12px 24px}header{border-radius:0;margin:0 -12px;padding:18px 16px}.controls{max-width:none;gap:8px;margin-top:16px}.controls>div{width:auto;flex:1}.controls input{width:130px}.identity h1{font-size:19px}.identity img{width:64px;height:48px}.periodnav{gap:8px}.periodnav strong{order:-1;flex-basis:100%;font-size:14px;margin:4px 0 8px}.periodnav button{font-size:12px;padding:8px 10px;flex:1}.livebar{gap:8px}#range{width:100%;font-size:11px}main>section.cards{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.cards article{padding:16px 13px;min-height:142px}.cards strong{font-size:clamp(20px,4.6vw,30px)}.cards h2{font-size:10px}.cards .productprofit{grid-column:1/-1;min-height:0;display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:14px}.cards .productprofit strong{font-size:22px;margin:0 0 0 auto}.cards .productprofit small{margin:0;width:100%}.activity{grid-template-columns:repeat(2,minmax(0,1fr));margin-top:12px}.activity article{padding:15px;border-right:1px solid #eceef2!important;border-bottom:1px solid #eceef2}.activity article:nth-child(2n){border-right:0!important}.activity article:nth-last-child(-n+2){border-bottom:0}.activity strong{font-size:23px}.activity h2{font-size:10px}.cost-panel{padding:16px}.metrics article{padding:12px}.metrics strong{font-size:18px}.details{padding:18px 12px}.details>h2{padding:0}.comparecontrols{padding:0;gap:8px}.comparecontrols label{width:100%}#comparesection p{padding:0}#search{display:block;margin:10px 0 16px;width:100%}.tablewrap{max-height:60vh}.products-panel table th:first-child,.products-panel table td:first-child{position:sticky;left:0;z-index:1;box-shadow:2px 0 3px #00000008;max-width:145px}.products-panel table thead th:first-child{z-index:2}.product-toggle{min-width:110px;font-size:12px}#productsort{max-width:65%;margin-left:4px}th,td{padding:11px 9px}.comparison-caption{font-size:11px;gap:6px}.resultdetails{font-size:11px}}
 .accountbar{display:flex;justify-content:flex-end;align-items:center;gap:12px;margin:12px 0;color:#555;font-size:13px}.accountbar button{background:#fff;color:#222;border:1px solid #bbb;font-size:12px;min-height:34px;padding:6px 10px;margin:0}
+
+/* Stock: fixed day scale and separate future purchases. */
+.stock-heading{display:flex;justify-content:space-between;align-items:center;gap:1rem}
+.stock-panel td small,.stock-panel td strong{display:block;margin-top:5px}
+.stock-panel td{min-width:125px;vertical-align:top}
+.stock-panel td:nth-child(4),.stock-panel td:nth-child(5){min-width:200px}
+.stock-meter{display:block;width:100%;height:18px;margin:8px 0;accent-color:#24a474}
+.stock-meter::-webkit-meter-bar{background:#e7eaf0;border:0;border-radius:7px}
+.stock-ok::-webkit-meter-optimum-value{background:#24a474}
+.stock-low::-webkit-meter-optimum-value{background:#df343e}
+.stock-low{accent-color:#df343e}
+.stock-warning{color:#a96300}.stock-inbound{color:#1764ba}
+.stock-form{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:16px;margin:18px 0}
+.stock-form label{display:flex;flex-direction:column;gap:6px}
+.stock-form input,.stock-form select{width:100%;box-sizing:border-box}
+.stock-panel details{padding:14px 0;border-top:1px solid #dde1e8}
