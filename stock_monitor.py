@@ -12,6 +12,7 @@ import time
 from datetime import datetime, timedelta
 from email.message import EmailMessage
 from zoneinfo import ZoneInfo
+from full_tools import stock_detail, operations_page, LIMITATION
 
 TZ = ZoneInfo('America/Argentina/Buenos_Aires')
 
@@ -116,7 +117,7 @@ class StockMonitor:
 
     async def read(self, force=False):
         async with self.lock:
-            if not force and self.cache and time.time()-self.cache['time']<300:
+            if not force and self.cache and self.cache.get('snapshot_revision')==self.initial().get('revision') and time.time()-self.cache['time']<300:
                 return copy.deepcopy(self.cache['data'])
             snapshot=self.initial()
             if not snapshot.get('data'):
@@ -137,7 +138,8 @@ class StockMonitor:
             orders,_=await self.m.cached_orders(client,start,now,force)
             missing=set(); daily={s:{} for s in bysku}
             warehouse={s:r['warehouse_available'] for s,r in bysku.items()}
-            full={}; full_errors=[]; invs={s:set() for s in bysku}; used={}
+            full={}; full_details={}; full_errors=[]; invs={s:set() for s in bysku}; used={}
+            catalog=[]
             try:
                 catalog=await self.catalog(client,source_rows)
                 for entry in catalog:
@@ -153,14 +155,15 @@ class StockMonitor:
                     if not inventory_ids:
                         full[sku]=None
                         continue
-                    count=0
+                    count=0; details=[]
                     try:
                         for inv in sorted(inventory_ids):
-                            stock=await client.get(f'/inventories/{inv}/stock/fulfillment')
+                            stock=await stock_detail(client, inv)
+                            details.append(stock)
                             qty=stock.get('available_quantity')
                             if stock.get('inventory_id')!=inv or type(qty) is not int or qty<0: raise ValueError('Stock inválido.')
                             count+=qty
-                        full[sku]=count
+                        full[sku]=count; full_details[sku]=details
                     except Exception: full[sku]=None; full_errors.append(sku)
             except Exception:
                 full={s:None for s in bysku}; full_errors=list(bysku)
@@ -207,7 +210,7 @@ class StockMonitor:
             for e in events:
                 s=e['sku']
                 if s not in bysku: continue
-                if stamp(e['created'])>anchors[s] and e['kind']!='count':
+                if stamp(e['created'])>anchors[s] and e['kind'] not in ('count','collection_dispatch'):
                     warehouse[s]+= e['quantity'] if e['kind']=='receive' else -e['quantity']
                 if e['kind']=='receive' and e.get('purchase_id'):
                     key=(e['purchase_id'],s); received[key]=received.get(key,0)+e['quantity']
@@ -220,14 +223,26 @@ class StockMonitor:
                 for s,q in full.items():
                     if q is not None:
                         c.execute('INSERT INTO stock_observations VALUES(?,?,?,?,?) ON CONFLICT(day,sku) DO UPDATE SET qty=MAX(qty,excluded.qty),last_at=excluded.last_at',(today.isoformat(),s,q,now.isoformat(),now.isoformat()))
+            collections=copy.deepcopy(data.get('full_collections',[]))
+            dispatched={}
+            for e in events:
+                if e['kind']=='collection_dispatch' and stamp(e['created'])>stamp(data['as_of']):
+                    key=(e['collection_id'],e['sku'])
+                    dispatched[key]=dispatched.get(key,0)+e['quantity']
+            for c in collections:
+                for part in c['items']:
+                    part['dispatched']=dispatched.get((c['id'],part['sku']),0)
+                    part['reserved_remaining']=max(0,part['quantity']-part['dispatched']) if c['status']=='reserved' else 0
             results=[]
             for s,r in bysku.items():
                 excluded=r.get('stockout_days',[])+[d for d,k,q,a,b in observed if k==s and q==0 and d<today.isoformat() and stamp(a).hour==0 and stamp(b).hour==23]
                 rate,factors,rates=forecast(daily[s],today,excluded)
                 f=full.get(s); w=warehouse[s]
+                reserved=sum(i['reserved_remaining'] for c in collections for i in c['items'] if i['sku']==s)
+                physical=w+reserved if w>=0 else None
                 stale=now-anchors[s]>timedelta(days=28)
                 uncertain=r.get('estimated',False) or s in warehouse_unknown or w<0 or stale or bool(missing)
-                total=w+f if f is not None and s not in warehouse_unknown and w>=0 and not stale else None
+                total=w+reserved+f if f is not None and s not in warehouse_unknown and w>=0 and not stale else None
                 fd=coverage(f,rate,factors,today); td=coverage(total,rate,factors,today)
                 lead=r['lead_days']; safety=r['safety_days']; target=r['target_days']
                 pending_s=sum(part['remaining'] for p in pending for part in p['items'] if part['sku']==s)
@@ -244,24 +259,43 @@ class StockMonitor:
                 if uncertain and action=='Comprar': action='Revisar conteo antes de comprar'
                 results.append(dict(sku=s,name=r.get('name',s),variant=r.get('variant',''),full=f,
                     full_snapshot=r['full_available'],full_snapshot_at=data.get('full_as_of',data['as_of']),
-                    warehouse=w if w>=0 and not stale else None,total=total,estimated=uncertain,
+                    warehouse=w if w>=0 and not stale else None,
+                    warehouse_physical=physical if not stale else None,warehouse_reserved=reserved,
+                    available_now=w+f if total is not None else None,total=total,estimated=uncertain,
+                    full_details=full_details.get(s,[]),
+                    full_listings=[e for e in catalog if e.get('inventory_id') in invs.get(s,set())],
                     full_days=fd,total_days=td,rate=round(rate,2),averages=rates,
                     lead_days=lead,safety_days=safety,full_target_days=r.get('full_target_days',10),
                     pending=pending_s,next_eta=next_eta,action=action,full_action=full_action,suggested=suggested,
                     count_at=anchors[s].isoformat(),excluded_stockout_days=len(excluded)))
+            # Read completed Full receptions separately; never infer a scheduled collection
+            # or alter warehouse balances merely because a Full quantity increased.
+            reception_key='stock_full_receptions_v1'
+            receptions=self.m.auto.get(reception_key,{})
+            if force or time.time()-receptions.get('time',0)>300:
+                try:
+                    ids=set(used)
+                    value=await operations_page(client,self.m.seller,ids,
+                        (today-timedelta(days=7)).isoformat(),(today+timedelta(days=1)).isoformat(),
+                        kind='INBOUND_RECEPTION') if ids else {'complete':False,'results':[],'error':'Sin inventarios Full verificados.'}
+                except Exception:
+                    value={'complete':False,'results':[],'error':'Movimientos Full no disponibles; no interpretar como ausencia de ingresos.'}
+                receptions={'time':time.time(),'data':value};self.m.auto.put(reception_key,receptions)
             result={'rows':results,'pending':pending,'revision':revision,'as_of':now.isoformat(),
                 'email_ready':self.mail_ready(),'email_state':self.m.auto.get('stock_mail_status','Sin envíos'),
                 'missing_listings':sorted(missing),'full_errors':full_errors,
                 'history':events[-30:][::-1],
+                'full_collections':collections,
+                'full_receptions':receptions.get('data'), 'full_access_limitations':LIMITATION,
                 'method':'Últimos 7/14/28 días completos, peso 60/30/10 y ajuste moderado por día de semana. Se excluyen días sin stock observados. Etapa del mes: pendiente de historial comparable suficiente. Cambios de precio/promoción se reflejan en el ritmo reciente; no se supone crecimiento adicional.',
                 'assumptions':data.get('assumptions',[])}
-            self.cache={'time':time.time(),'data':copy.deepcopy(result)}
+            self.cache={'time':time.time(),'snapshot_revision':snapshot.get('revision'),'data':copy.deepcopy(result)}
             return result
 
     async def move(self, payload, actor):
         if not isinstance(payload,dict): raise ValueError('Movimiento inválido.')
         kind=payload.get('kind'); qty=payload.get('quantity'); ident=payload.get('id','')
-        if kind not in ('receive','sale','transfer','count') or type(qty) is not int or qty<0 or qty>100000 or (kind!='count' and qty==0):
+        if kind not in ('receive','sale','transfer','count','collection_dispatch') or type(qty) is not int or qty<0 or qty>100000 or (kind!='count' and qty==0):
             raise ValueError('Tipo o cantidad inválida.')
         if not re.fullmatch(r'[A-Za-z0-9-]{12,80}',ident): raise ValueError('Identificador inválido.')
         note=payload.get('note','').strip()
@@ -277,10 +311,17 @@ class StockMonitor:
                 expected=sum(i['quantity'] for p in snapshot['data'].get('purchase_orders',[]) if p['id']==p_id for i in p['items'] if i['sku']==payload['sku'])
                 already=sum(e['quantity'] for e in events if e['kind']=='receive' and e.get('purchase_id')==p_id and e['sku']==payload['sku'])
                 if kind!='receive' or expected-already<qty: raise ValueError('La recepción excede el saldo del pedido.')
+            collection_id=payload.get('collection_id')
+            if kind=='collection_dispatch':
+                collection=next((c for c in snapshot['data'].get('full_collections',[]) if c['id']==collection_id and c['status']=='reserved'),None)
+                expected=sum(i['quantity'] for i in (collection or {}).get('items',[]) if i['sku']==payload['sku'])
+                sent=sum(e['quantity'] for e in events if e['kind']=='collection_dispatch' and e.get('collection_id')==collection_id and e['sku']==payload['sku'] and stamp(e['created'])>stamp(snapshot['data']['as_of']))
+                if expected-sent<qty: raise ValueError('No hay esa cantidad reservada en la colecta.')
             if kind in ('sale','transfer'):
                 cached=next((r for r in (self.cache or {}).get('data',{}).get('rows',[]) if r['sku']==payload['sku']),{})
                 if cached.get('warehouse') is None or cached['warehouse']<qty: raise ValueError('Saldo insuficiente o desconocido. Recontá el depósito.')
             body={k:payload.get(k) for k in ('sku','kind','quantity')}; body.update(note=note,purchase_id=p_id)
+            if kind=='collection_dispatch': body['collection_id']=collection_id
             with self.m.db() as c:
                 c.execute('INSERT INTO stock_events VALUES(?,?,?,?)',(ident,datetime.now(TZ).isoformat(),actor,json.dumps(body)))
             self.cache=None
