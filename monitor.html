@@ -17,6 +17,11 @@
   <div class="controls"><label for="period">Vista</label><select id="period"><option value="day">Diario</option><option value="week">Semanal</option><option value="month">Mensual</option></select><label for="day">Fecha</label><div><input id="day" type="date"><button id="refresh">Actualizar</button></div></div>
  </header>
  <div class="accountbar"><span id="accountname"></span><button id="logout" type="button">Cerrar sesión</button></div>
+ <nav class="monitor-tabs" role="tablist" aria-label="Secciones del monitor">
+  <button id="tab-profit" type="button" role="tab" aria-controls="profitability-view" aria-selected="true">Rentabilidad</button>
+  <button id="tab-stock" type="button" role="tab" aria-controls="stocksection" aria-selected="false" tabindex="-1">Stock y reposición</button>
+ </nav>
+ <div id="profitability-view" role="tabpanel" aria-labelledby="tab-profit">
  <nav class="periodnav" aria-label="Navegar períodos"><button id="periodback">← Anterior</button><strong id="periodlabel"></strong><button id="periodforward">Siguiente →</button><button id="periodtoday">Hoy</button></nav>
  <div class="livebar"><span id="live">CONECTANDO</span><time id="clock"></time><span id="range"></span></div><p id="comparison"></p>
  <p id="state" role="status">Verificando acceso…</p>
@@ -46,26 +51,6 @@
   <article><h2>Comisiones</h2><strong id="fees">—</strong></article>
  </section>
  </details>
- <section class="details stock-panel" id="stocksection">
- <div class="stock-heading"><h2>Stock y reposición</h2><button id="stockrefresh" type="button">Actualizar stock</button></div>
- <p id="stockstatus" role="status">Consultando inventario…</p>
- <p id="stockemail"></p>
- <div class="tablewrap"><table><thead><tr><th>Producto / variante</th><th>Full</th><th>Depósito disponible</th><th>Días en Full</th><th>Días de stock total</th><th>Acción</th></tr></thead><tbody id="stockrows"></tbody></table></div>
- <p class="tablehint">Barras con escala común de 90 días; el número muestra la cobertura completa. Total disponible = Full + depósito libre. Fabricación y tránsito se muestran aparte. El conteo estimado puede requerir conciliación.</p>
- <details><summary>Pedidos pendientes y mercadería en tránsito</summary><div class="tablewrap"><table><thead><tr><th>Pedido</th><th>Estado</th><th>Producto / variante</th><th>Pendiente</th><th>Llegada estimada</th></tr></thead><tbody id="stockpending"></tbody></table></div></details>
- <details><summary>Registrar movimiento del depósito</summary>
- <p>Ingresos, ventas fuera de ML, envíos a Full o conteo físico. Las ventas de ML se descuentan automáticamente. Enviar a Full reduce el depósito; Full aumenta cuando ML habilita las unidades.</p>
- <form id="stockform" class="stock-form">
- <label>Producto / variante<select id="stocksku" required></select></label>
- <label>Movimiento<select id="stockkind"><option value="receive">Ingreso al depósito</option><option value="sale">Salida / venta fuera de ML</option><option value="transfer">Despacho a Full</option><option value="count">Fijar conteo físico disponible</option></select></label>
- <label>Cantidad<input id="stockqty" type="number" min="0" max="100000" step="1" required></label>
- <label>Pedido recibido (solo ingresos)<select id="stockpurchase"><option value="">Sin pedido asociado</option></select></label>
- <label>Motivo / comprobante<input id="stocknote" minlength="3" maxlength="300" required placeholder="Ej.: recepción UPS, conteo de Maxi"></label>
- <button id="stocksave" type="submit">Guardar movimiento</button>
- </form><p id="stockmovestatus" role="status"></p>
- <div class="tablewrap"><table><thead><tr><th>Fecha</th><th>Usuario</th><th>Producto</th><th>Movimiento</th><th>Cantidad</th><th>Motivo</th></tr></thead><tbody id="stockhistory"></tbody></table></div></details>
- <details><summary>Cómo se calcula y qué falta verificar</summary><p id="stockmethod"></p><ul id="stockassumptions"></ul></details>
- </section>
  <section class="details products-panel">
   <h2>Productos vendidos</h2>
   <label for="productsort">Ordenar por</label> <select id="productsort"><option value="profit">Mayor ganancia total</option><option value="units">Más unidades</option><option value="margin_percent">Mayor margen</option></select>
@@ -91,4 +76,25 @@
  <label for="search">Buscar venta o producto</label><input id="search" type="search" placeholder="Número, producto o variante">
  <div class="tablewrap"><table><thead><tr><th>Fecha y hora</th><th>Venta</th><th>Estado</th><th>Producto y variante</th><th>Unidades</th><th>Precio de venta por unidad</th><th>Precio promedio de venta</th><th>Facturación sin cancelaciones y reintegros registrados</th><th>Comisión</th><th>Mercadería</th><th>Ganancia antes de otros gastos</th></tr></thead><tbody id="orders"></tbody></table></div>
  <div class="pager"><button id="prev">Anterior</button><span id="page"></span><button id="next">Siguiente</button></div>
- </section></main></body></html>
+ </section></div>
+ <section class="details stock-panel" id="stocksection" role="tabpanel" aria-labelledby="tab-stock" hidden>
+ <div class="stock-heading"><h2>Stock y reposición</h2><button id="stockrefresh" type="button">Actualizar stock</button></div>
+ <p id="stockstatus" role="status">Consultando inventario…</p>
+ <p id="stockemail"></p>
+ <div class="tablewrap"><table><thead><tr><th>Producto / variante</th><th>Full</th><th>Depósito disponible</th><th>Días en Full</th><th>Días de stock total</th><th>Acción</th></tr></thead><tbody id="stockrows"></tbody></table></div>
+ <p class="tablehint">Barras con escala común de 90 días; el número muestra la cobertura completa. Total disponible = Full + depósito libre. Fabricación y tránsito se muestran aparte. El conteo estimado puede requerir conciliación.</p>
+ <details><summary>Pedidos pendientes y mercadería en tránsito</summary><div class="tablewrap"><table><thead><tr><th>Pedido</th><th>Estado</th><th>Producto / variante</th><th>Pendiente</th><th>Llegada estimada</th></tr></thead><tbody id="stockpending"></tbody></table></div></details>
+ <details><summary>Registrar movimiento del depósito</summary>
+ <p>Ingresos, ventas fuera de ML, envíos a Full o conteo físico. Las ventas de ML se descuentan automáticamente. Enviar a Full reduce el depósito; Full aumenta cuando ML habilita las unidades.</p>
+ <form id="stockform" class="stock-form">
+ <label>Producto / variante<select id="stocksku" required></select></label>
+ <label>Movimiento<select id="stockkind"><option value="receive">Ingreso al depósito</option><option value="sale">Salida / venta fuera de ML</option><option value="transfer">Despacho a Full</option><option value="count">Fijar conteo físico disponible</option></select></label>
+ <label>Cantidad<input id="stockqty" type="number" min="0" max="100000" step="1" required></label>
+ <label>Pedido recibido (solo ingresos)<select id="stockpurchase"><option value="">Sin pedido asociado</option></select></label>
+ <label>Motivo / comprobante<input id="stocknote" minlength="3" maxlength="300" required placeholder="Ej.: recepción UPS, conteo de Maxi"></label>
+ <button id="stocksave" type="submit">Guardar movimiento</button>
+ </form><p id="stockmovestatus" role="status"></p>
+ <div class="tablewrap"><table><thead><tr><th>Fecha</th><th>Usuario</th><th>Producto</th><th>Movimiento</th><th>Cantidad</th><th>Motivo</th></tr></thead><tbody id="stockhistory"></tbody></table></div></details>
+ <details><summary>Cómo se calcula y qué falta verificar</summary><p id="stockmethod"></p><ul id="stockassumptions"></ul></details>
+ </section>
+</main></body></html>
