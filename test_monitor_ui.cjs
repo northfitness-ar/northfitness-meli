@@ -21,7 +21,7 @@ const sample={gross:'2472039.00',cancelled:'53779.00',paid_sales:123,sold_units:
 let response=sample;
 const preferences=new Map();const localStorage={getItem:k=>preferences.get(k),setItem:(k,v)=>preferences.set(k,v)};
 const context=vm.createContext({document:{getElementById:id=>ids[id],createElement:tag=>new Element(tag)},Intl,Date,Number,Map,Set,JSON,URLSearchParams,
- setTimeout:()=>1,clearTimeout:()=>{},setInterval:()=>1,localStorage,location:{hash:''},fetch:async()=>({ok:true,json:async()=>response})});
+ setTimeout:()=>1,clearTimeout:()=>{},setInterval:()=>1,localStorage,location:{hash:''},window:{addEventListener(){}},fetch:async()=>({ok:true,json:async()=>response})});
 vm.runInContext(fs.readFileSync('monitor.js','utf8').replace('saveSettings();init();','saveSettings();'),context);
 (async()=>{
  ids.day.value='2026-09-28';ids.period.value='month';vm.runInContext('navigation()',context);

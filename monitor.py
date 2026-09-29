@@ -3,35 +3,28 @@ import asyncio
 import base64
 import contextlib
 import copy
-import hashlib
-import hmac
 import json
-import secrets
 import sqlite3
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
-from starlette.responses import HTMLResponse, JSONResponse
+from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
+from monitor_auth import MonitorAuth, AuthError, COOKIE
 from sales_data import all_orders
 from sales_data import instant
 from profitability import summarize, summarize_period, validate_policy, amount
 
 TZ = ZoneInfo('America/Argentina/Buenos_Aires')
 HEADERS = {'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer',
-           'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY',
-           'Content-Security-Policy': "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'"}
+           'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY', 'X-Robots-Tag': 'noindex, nofollow',
+           'Content-Security-Policy': "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"}
 
 
 class Monitor:
     def __init__(self, data, auto, seller, base_url, permanent_secret=None):
         self.path = str(data / 'monitor.sqlite3')
         self.auto, self.seller, self.base_url = auto, seller, base_url.rstrip('/')
-        self.permanent_token = None
-        if permanent_secret:
-            digest = hmac.new(str(permanent_secret).encode(),
-                              b'northfitness-monitor-permanent-link-v1', hashlib.sha256).digest()
-            self.permanent_token = base64.urlsafe_b64encode(digest).rstrip(b'=').decode()
         self.lock = asyncio.Lock()
         with self.db() as c:
             c.executescript('''CREATE TABLE IF NOT EXISTS config (id INTEGER PRIMARY KEY, revision INTEGER, body TEXT);
@@ -40,6 +33,7 @@ class Monitor:
             CREATE TABLE IF NOT EXISTS shipping_costs (shipment TEXT PRIMARY KEY, body TEXT, updated_at REAL);
             CREATE TABLE IF NOT EXISTS sessions (hash TEXT PRIMARY KEY, kind TEXT, expires REAL);
             ''')
+        self.auth = MonitorAuth(self.db, self.base_url)
 
     @contextlib.contextmanager
     def db(self):
@@ -70,39 +64,8 @@ class Monitor:
             c.execute('INSERT INTO policy_history VALUES(?,?,?)', (current + 1, body, time.time()))
         return {'revision': current + 1, 'saved': True}
 
-    def issue(self, kind, seconds):
-        token = secrets.token_urlsafe(32)
-        with self.db() as c:
-            c.execute('DELETE FROM sessions WHERE expires < ?', (time.time(),))
-            c.execute('INSERT INTO sessions VALUES(?,?,?)', (hashlib.sha256(token.encode()).hexdigest(), kind, time.time() + seconds))
-        return token
-
-    def exchange(self, token):
-        if not isinstance(token, str) or len(token) > 200:
-            return None
-        if self.permanent_token and secrets.compare_digest(token, self.permanent_token):
-            return self.issue('cookie', 8 * 3600)
-        with self.db() as c:
-            c.execute('BEGIN IMMEDIATE')
-            digest = hashlib.sha256(token.encode()).hexdigest()
-            row = c.execute("SELECT expires FROM sessions WHERE hash=? AND kind='link'", (digest,)).fetchone()
-            if not row or row[0] < time.time():
-                return None
-            c.execute('DELETE FROM sessions WHERE hash=?', (digest,))
-        return self.issue('cookie', 8 * 3600)
-
-    def permanent_url(self):
-        if not self.permanent_token:
-            raise ValueError('Acceso permanente no configurado.')
-        return self.base_url + '/monitor#' + self.permanent_token
-
     def authorized(self, request):
-        token = request.cookies.get('nf_monitor', '')
-        if not token or len(token) > 200:
-            return False
-        with self.db() as c:
-            row = c.execute("SELECT expires FROM sessions WHERE hash=? AND kind='cookie'", (hashlib.sha256(token.encode()).hexdigest(),)).fetchone()
-        return bool(row and row[0] > time.time())
+        return self.auth.user(request) is not None
 
     async def ads(self, client, day):
         data = await client.get('/advertising/advertisers', {'product_id': 'PADS'}, headers={'api-version': '1'})
@@ -567,10 +530,24 @@ def register(mcp, api, auto, seller, data, env):
 
     @mcp.tool(annotations={'readOnlyHint': False, 'destructiveHint': False, 'openWorldHint': False})
     def nf_monitor_abrir() -> dict:
-        """Devuelve el acceso privado permanente al monitor. Sólo para el titular; no compartir."""
+        """Devuelve el login del monitor y enlaces de activación de cuentas pendientes.
+        Sólo para el titular. Los enlaces son privados, de un uso y duran 24 horas.
+        Cada llamada reemplaza los enlaces pendientes anteriores. Nunca solicita contraseñas en el chat.
+        """
         api()
+        return monitor.auth.activation_links()
+
+    @mcp.tool(annotations={'readOnlyHint': False, 'destructiveHint': True, 'openWorldHint': False})
+    def nf_monitor_usuario_restablecer(usuario: str, confirmacion: str) -> dict:
+        """Restablece acceso de salvador o maxi SOLO por orden explícita del titular.
+        Invalida la contraseña y TODAS las sesiones de ese usuario; devuelve enlace privado
+        de un uso para elegir nueva contraseña. No cambia ML/MP. Requiere confirmacion=RESTABLECER_ACCESO_MONITOR.
+        """
+        api()
+        if confirmacion != 'RESTABLECER_ACCESO_MONITOR':
+            raise ToolError('Falta confirmación explícita de restablecimiento.')
         try:
-            return {'url': monitor.permanent_url(), 'permanent': True, 'expires_in_seconds': None}
+            return monitor.auth.reset(usuario)
         except ValueError as exc:
             raise ToolError(str(exc)) from None
 
@@ -590,13 +567,19 @@ def register(mcp, api, auto, seller, data, env):
 
     @mcp.custom_route('/monitor', methods=['GET'])
     async def page(request):
+        if not monitor.authorized(request):
+            return RedirectResponse('/monitor/login', status_code=303, headers=HEADERS)
         return HTMLResponse((Path(__file__).parent / 'monitor.html').read_text(), headers=HEADERS)
+
+    @mcp.custom_route('/monitor/login', methods=['GET'])
+    async def login_page(request):
+        return HTMLResponse((Path(__file__).parent / 'monitor-login.html').read_text(), headers=HEADERS)
 
     @mcp.custom_route('/monitor/assets/{name}', methods=['GET'])
     async def asset(request):
         from starlette.responses import Response
         name = request.path_params['name']
-        if name not in ('monitor.js', 'monitor.css', 'northfitness-logo.jpg', 'apple-touch-icon.png'):
+        if name not in ('monitor.js', 'monitor.css', 'monitor-login.js', 'monitor-login.css', 'northfitness-logo.jpg', 'apple-touch-icon.png'):
             return Response(status_code=404)
         path = Path(__file__).parent / name
         if name.endswith(('.jpg', '.png')):
@@ -612,25 +595,67 @@ def register(mcp, api, auto, seller, data, env):
 
     @mcp.custom_route('/monitor/session', methods=['POST'])
     async def session(request):
+        # Explicitly retired: no fallback to permanent or one-use legacy bearer links.
+        return JSONResponse({'error': 'El acceso por enlace fue deshabilitado. Ingresá con tu usuario y contraseña.'},
+                            status_code=401, headers=HEADERS)
+
+    async def credentials(request, activation=False):
         if request.headers.get('origin') != monitor.base_url:
             return JSONResponse({'error': 'Origen no autorizado.'}, status_code=403, headers=HEADERS)
-        raw = await request.body()
-        if len(raw) > 512:
+        if request.headers.get('content-type', '').split(';')[0].strip().lower() != 'application/json':
+            return JSONResponse({'error': 'Solicitud inválida.'}, status_code=400, headers=HEADERS)
+        raw = bytearray()
+        async for chunk in request.stream():
+            raw.extend(chunk)
+            if len(raw) > 4096:
+                return JSONResponse({'error': 'Solicitud demasiado grande.'}, status_code=413, headers=HEADERS)
+        try:
+            payload = json.loads(raw)
+        except (ValueError, UnicodeError):
+            payload = None
+        if not isinstance(payload, dict):
             return JSONResponse({'error': 'Solicitud inválida.'}, status_code=400, headers=HEADERS)
         try:
-            token = monitor.exchange(json.loads(raw).get('token'))
-        except (ValueError, AttributeError):
-            token = None
-        if not token:
-            return JSONResponse({'error': 'Enlace vencido o ya utilizado. Pedí un nuevo acceso desde NorthFitness.'}, status_code=401, headers=HEADERS)
-        response = JSONResponse({'ok': True}, headers=HEADERS)
-        response.set_cookie('nf_monitor', token, max_age=8*3600, secure=True, httponly=True, samesite='strict', path='/monitor')
+            result = await asyncio.to_thread(monitor.auth.authenticate, payload,
+                                            request.client.host if request.client else 'unknown', activation)
+        except AuthError as exc:
+            headers = dict(HEADERS)
+            if exc.status == 429:
+                headers['Retry-After'] = '900'
+            return JSONResponse({'error': str(exc)}, status_code=exc.status, headers=headers)
+        monitor.auth.logout(request)
+        response = JSONResponse({'ok': True, 'username': result['username']}, headers=HEADERS)
+        response.set_cookie(COOKIE, result['token'], max_age=result['seconds'] if result['remember'] else None,
+                            secure=True, httponly=True, samesite='strict', path='/monitor')
+        response.delete_cookie('nf_monitor', path='/monitor', secure=True, httponly=True, samesite='strict')
         return response
+
+    @mcp.custom_route('/monitor/login', methods=['POST'])
+    async def login(request):
+        return await credentials(request)
+
+    @mcp.custom_route('/monitor/activate', methods=['POST'])
+    async def activate(request):
+        return await credentials(request, activation=True)
+
+    @mcp.custom_route('/monitor/logout', methods=['POST'])
+    async def logout(request):
+        if request.headers.get('origin') != monitor.base_url:
+            return JSONResponse({'error': 'Origen no autorizado.'}, status_code=403, headers=HEADERS)
+        monitor.auth.logout(request)
+        response = JSONResponse({'ok': True}, headers=HEADERS)
+        response.delete_cookie(COOKIE, path='/monitor', secure=True, httponly=True, samesite='strict')
+        return response
+
+    @mcp.custom_route('/monitor/me', methods=['GET'])
+    async def me(request):
+        username = monitor.auth.user(request)
+        return JSONResponse({'username': username}, status_code=200 if username else 401, headers=HEADERS)
 
     @mcp.custom_route('/monitor/data', methods=['GET'])
     async def data_route(request):
         if not monitor.authorized(request):
-            return JSONResponse({'error': 'Pedí «abrir monitor» en NorthFitness para acceder.'}, status_code=401, headers=HEADERS)
+            return JSONResponse({'error': 'Ingresá con tu usuario y contraseña.'}, status_code=401, headers=HEADERS)
         try:
             result = await monitor.period(request.query_params.get('date', datetime.now(TZ).date().isoformat()), request.query_params.get('period', 'day'), force=request.query_params.get('refresh') == '1')
             return JSONResponse(result, headers=HEADERS)

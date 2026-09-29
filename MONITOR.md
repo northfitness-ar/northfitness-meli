@@ -1,10 +1,38 @@
 # Monitor de rentabilidad NorthFitness
 
 Implementación sobre el servidor existente. No requiere publicar los datos ni contratar otro hosting.
-El panel se sirve en `/monitor`; el acceso se obtiene desde ChatGPT con `nf_monitor_abrir`.
-El enlace privado es permanente y reutilizable. Lleva una credencial derivada del secreto de firma
-en el fragmento (no enviada en la URL HTTP) y crea una cookie privada de 8 horas en cada apertura.
-No compartirlo. La ruta HTML no contiene ventas. Rotar `JWT_SIGNING_KEY` revoca el enlace.
+El panel se sirve en `/monitor` y requiere usuario y contraseña propios del monitor.
+Existen sólo dos usuarios: `salvador` y `maxi`, ambos con acceso de lectura al mismo panel.
+No hay registro público ni contraseña predeterminada. El antiguo enlace permanente y sus
+cookies quedan invalidados al desplegar esta versión; no se rota la clave del conector.
+
+El titular autenticado puede pedir `nf_monitor_abrir` desde ChatGPT. Devuelve la URL normal
+y enlaces privados de activación únicamente para usuarios que aún no tienen contraseña.
+Cada enlace dura 24 horas, se usa una vez, está vinculado a un usuario y sólo permite elegir
+su contraseña directamente en el navegador. Pedir enlaces nuevos invalida los pendientes.
+Entregar cada enlace sólo al socio correspondiente. No pegar contraseñas en ChatGPT ni GitHub.
+
+Las contraseñas requieren entre 15 y 128 caracteres y se guardan con sal aleatoria y
+PBKDF2-HMAC-SHA256 de 600.000 iteraciones. Los tokens se almacenan sólo como hashes SHA256.
+La cookie `__Secure-nf_monitor_v2` es Secure, HttpOnly, SameSite=Strict, restringida a `/monitor`.
+«Recordarme» dura 30 días; sin esa opción es una cookie de sesión con límite de 8 horas en el
+servidor. Cerrar sesión la revoca en el servidor. Las cuentas y sesiones persisten en el disco
+actual de Render; no requieren variables de entorno nuevas ni servicios externos.
+
+Los intentos se limitan en SQLite de manera atómica por usuario (10), dirección cliente (30)
+y globalmente (100), en ventanas de 15 minutos. Un login correcto limpia el contador de ese
+usuario, pero no los límites por dirección/globales. No se confían encabezados proxy leídos
+manualmente; se usa la dirección cliente que proporciona ASGI. En una infraestructura que
+muestre siempre la misma IP de proxy, el límite por dirección se comparte entre los socios.
+Los POST de credenciales y cierre de sesión exigen Origin exacto; las credenciales requieren
+JSON y cuerpo máximo de 4 KB. No se guardan datos del monitor ni credenciales en localStorage.
+
+Para recuperar una cuenta, el titular debe ordenar explícitamente
+`nf_monitor_usuario_restablecer(usuario, confirmacion="RESTABLECER_ACCESO_MONITOR")`.
+Invalida contraseña, activaciones previas y todas las sesiones de ese usuario, y genera un
+enlace para elegir una nueva contraseña. El otro socio conserva su acceso. No hay envío de
+emails ni cambios a los permisos de Mercado Libre. Proteger también la cuenta del titular
+en ChatGPT, ya que ese acceso autenticado permite restablecer usuarios.
 
 ## Estado y alcance
 
@@ -41,9 +69,10 @@ La clasificación del ajuste impositivo debe validarse con el responsable de la 
 6. Leer `nf_monitor_configuracion`, cargar configuración completa mediante `nf_monitor_configurar`
    con `expected_revision` devuelto. No completar desconocidos con cero.
 7. Ejecutar `nf_monitor_resumen` para un día y verificar contra órdenes y liquidación de ML/MP.
-8. Ejecutar `nf_monitor_abrir` una vez, guardar el enlace privado como favorito y abrir siempre ese
-   mismo acceso. Si vence la cookie, el enlace vuelve a autorizar el navegador. La carpeta del
-   proyecto no ejecuta el servicio. Rotar el secreto de firma invalida el enlace anterior.
+8. Ejecutar `nf_monitor_abrir`, entregar cada activación a su socio y elegir las contraseñas
+   en la página. Guardar `/monitor` sin fragmento como favorito o acceso de iPhone. Si vence
+   la sesión, ingresar con usuario y contraseña. El código fuente no contiene credenciales.
+   No volver a una versión con enlaces permanentes: reintroduciría ese acceso antiguo.
 
 La carga externa de Ads se ejecuta a las 07:00 de Argentina. El monitor no agrega otro scheduler
 para esa carga: consume el importe fechado que ya se haya guardado en la configuración.
