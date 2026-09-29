@@ -596,16 +596,17 @@ def register(mcp, api, auto, seller, data, env):
     async def asset(request):
         from starlette.responses import Response
         name = request.path_params['name']
-        if name not in ('monitor.js', 'monitor.css', 'northfitness-logo.jpg'):
+        if name not in ('monitor.js', 'monitor.css', 'northfitness-logo.jpg', 'apple-touch-icon.png'):
             return Response(status_code=404)
         path = Path(__file__).parent / name
-        if name.endswith('.jpg'):
-            encoded = (Path(__file__).parent / 'northfitness-logo.b64').read_bytes()
+        if name.endswith(('.jpg', '.png')):
+            encoded_name = 'apple-touch-icon.b64' if name.endswith('.png') else 'northfitness-logo.b64'
+            encoded = (Path(__file__).parent / encoded_name).read_bytes()
             try:
                 content = base64.b64decode(b''.join(encoded.split()), validate=True)
             except ValueError:
                 return Response(status_code=500, headers=HEADERS)
-            return Response(content, headers=HEADERS, media_type='image/jpeg')
+            return Response(content, headers=HEADERS, media_type='image/png' if name.endswith('.png') else 'image/jpeg')
         return Response(path.read_text(), headers=HEADERS,
                         media_type='text/javascript' if name.endswith('.js') else 'text/css')
 
