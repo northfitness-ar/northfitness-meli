@@ -77,3 +77,31 @@ def test_no_email_without_configuration(tmp_path):
     assert not s.mail_ready()
     asyncio.run(s.alerts({'rows':[{'action':'Comprar'}]}))
     with s.m.db() as db: assert db.execute('SELECT count(*) FROM stock_mail').fetchone()[0]==0
+
+def test_reserved_collection_stays_physical_and_dispatch_never_deducts_twice(tmp_path):
+    s,o,c=setup(tmp_path)
+    row=s.m.auto.data['stock'][0];row['warehouse_available']=25;row['warehouse_reserved']=65
+    s.m.auto.data['full_collections']=[{'id':'COL','name':'Thursday','status':'reserved','date':'2026-10-01','items':[{'sku':'A','quantity':65}]}]
+    d=asyncio.run(s.read());r=d['rows'][0]
+    assert (r['warehouse'],r['warehouse_physical'],r['warehouse_reserved'],r['total'],r['available_now'])==(23,88,65,93,28)
+    p={'id':'dispatch-123456','revision':d['revision'],'kind':'collection_dispatch','quantity':50,'sku':'A','collection_id':'COL','note':'Carrier picked up'}
+    assert asyncio.run(s.move(p,'maxi'))['saved']
+    assert asyncio.run(s.move(p,'maxi'))['duplicate']
+    d=asyncio.run(s.read(True));r=d['rows'][0]
+    assert (r['warehouse'],r['warehouse_physical'],r['warehouse_reserved'],r['full'])==(23,38,15,5)
+    assert d['full_collections'][0]['items'][0]['dispatched']==50
+    p.update(id='dispatch-999999',revision=d['revision'],quantity=16)
+    with pytest.raises(ValueError):asyncio.run(s.move(p,'maxi'))
+    p.update(quantity=15,collection_id='OTHER')
+    with pytest.raises(ValueError):asyncio.run(s.move(p,'maxi'))
+
+def test_collection_validation_and_future_purchase_not_physical(tmp_path):
+    from replenishment import validate
+    s,o,c=setup(tmp_path);data=s.m.auto.data
+    data['full_collections']=[{'id':'FUTURE','status':'awaiting_stock','items':[{'sku':'A','quantity':200}]}]
+    validate(data)
+    d=asyncio.run(s.read());assert d['rows'][0]['warehouse_reserved']==0 and d['rows'][0]['total']==13
+    data['stock'][0]['warehouse_reserved']=200
+    with pytest.raises(ValueError):validate(data)
+    data['full_collections'][0]['status']='reserved'
+    validate(data)
