@@ -44,6 +44,27 @@
   catch(e){el('stockstatus').textContent='SIN ACTUALIZAR · '+e.message;el('stockstatus').className='error';}
   finally{busy=false;el('stockrefresh').disabled=false;timer=setTimeout(refresh,300000);}
  }
+ function selectSection(section,focus=false){
+  const stock=section==='stock';
+  el('profitability-view').hidden=stock;el('stocksection').hidden=!stock;
+  document.querySelector('header .controls').hidden=stock;
+  document.querySelector('h1').textContent=stock?'Stock y reposición':'Monitor de rentabilidad';
+  for(const [id,active] of [['tab-profit',!stock],['tab-stock',stock]]){
+   el(id).setAttribute('aria-selected',String(active));el(id).tabIndex=active?0:-1;
+   if(active&&focus)el(id).focus();
+  }
+  try{localStorage.setItem('nf-monitor-section',stock?'stock':'profit');}catch(_){}
+ }
+ for(const [id,section] of [['tab-profit','profit'],['tab-stock','stock']]){
+  el(id).onclick=()=>selectSection(section);
+  el(id).onkeydown=event=>{
+   if(['ArrowLeft','ArrowRight','Home','End'].includes(event.key)){
+    event.preventDefault();selectSection(event.key==='Home'?'profit':event.key==='End'?'stock':section==='stock'?'profit':'stock',true);
+   }
+  };
+ }
+ let initialSection='profit';try{initialSection=localStorage.getItem('nf-monitor-section')||'profit';}catch(_){}
+ selectSection(initialSection);
  el('stockrefresh').onclick=()=>refresh(true);
  el('stockkind').onchange=()=>{el('stockpurchase').disabled=el('stockkind').value!=='receive';if(el('stockpurchase').disabled)el('stockpurchase').value='';};
  el('stockform').onsubmit=async event=>{
