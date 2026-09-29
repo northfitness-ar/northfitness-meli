@@ -34,3 +34,10 @@ main>section.cards{grid-template-columns:1.2fr 1.2fr .85fr;gap:16px}.cards artic
 .stock-form label{display:flex;flex-direction:column;gap:6px}
 .stock-form input,.stock-form select{width:100%;box-sizing:border-box}
 .stock-panel details{padding:14px 0;border-top:1px solid #dde1e8}
+
+/* Separate operational inventory from profitability. */
+[hidden]{display:none!important}
+.monitor-tabs{display:flex;gap:8px;margin:16px 0 24px;border-bottom:1px solid #ddd;padding-bottom:10px}
+.monitor-tabs button{padding:12px 18px;border:1px solid #aaa;border-radius:8px;background:#fff;color:#333;font-weight:600}
+.monitor-tabs button[aria-selected="true"]{background:#182326;color:#fff;border-color:#182326}
+.monitor-tabs button:focus-visible{outline:3px solid #13856b;outline-offset:3px}
