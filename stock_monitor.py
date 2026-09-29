@@ -272,7 +272,7 @@ class StockMonitor:
             # or alter warehouse balances merely because a Full quantity increased.
             reception_key='stock_full_receptions_v1'
             receptions=self.m.auto.get(reception_key,{})
-            if (force or time.time()-receptions.get('time',0)>300) and not receptions.get('blocked'):
+            if (force or time.time()-receptions.get('time',0)>300 or (receptions.get('data',{}).get('error') and 'error_code' not in receptions.get('data',{}))) and not receptions.get('blocked'):
                 try:
                     ids=set(used)
                     value=await operations_page(client,self.m.seller,ids,
