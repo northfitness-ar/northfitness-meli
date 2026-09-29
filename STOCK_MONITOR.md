@@ -48,3 +48,36 @@ Validation: targeted stock, monitor and authentication pytest suites; existing J
 UI harnesses; stock JS syntax. Tests cover duplicate Full inventory IDs, failed ML
 reads, physical returns, receipt idempotency/overreceipt, count resets, transfers,
 revision conflicts, outage forecasting and unconfigured email.
+
+## Full reconciliation and reserved warehouse stock
+
+Read-only tools `nf_full_consultar`, `nf_full_operaciones` and `nf_full_resumen`
+expose seller-verified inventory details, conditions of unavailable units and
+paginated operations. Operations accept a maximum31-day date interval, with an
+exclusive end date; every page verifies seller and inventory IDs. Stock UI includes
+unique Full inventories and their linked publications, and reads a separate page
+of recent inbound receptions. A missing/forbidden response remains unknown.
+
+The official local-seller API documents stock and operations, not the complete
+Seller Center collection calendar or capacity planning. This release does not
+claim automatic import of future collections or associate a reception with a
+collection merely because quantities match. Declared collections retain source
+and date; receipts remain a reconciliation aid, not an automatic ledger write.
+
+Private snapshot `full_collections`: id, name, status (`reserved`, `awaiting_stock`,
+`unverified`), optional date, source, items [{sku,quantity}]. Per-row
+`warehouse_reserved` must equal the quantities of baseline reserved collections.
+`warehouse_available` remains the FREE quantity: introducing a new reservation
+requires moving that quantity from free to reserved in the same versioned snapshot.
+Existing reservations must not be deducted again. Imported snapshots retain their
+original as_of and already netted free balances; changing as_of requires reconciling
+the event journal rather than blindly rebasing it.
+
+Display physical warehouse = free + remaining reserved. Total coverage includes
+reserved stock still physically present, excludes new purchases and dispatched
+transit. The separate Full coverage still uses only currently sellable Full stock.
+`collection_dispatch` records removal of reserved units, bounded by the remaining
+reservation and idempotent request ID. It reduces reserved physical units without
+deducting free warehouse again or locally increasing Full. The reserved collection
+selector in the movement form identifies the batch. Dispatched stock is explicitly
+shown as pending reconciliation against Full; no time-based automatic receipt.
