@@ -25,6 +25,26 @@ def validate(data):
             if type(inbound['quantity']) is not int or inbound['quantity']<=0: raise ValueError('Ingreso inválido')
             eta=datetime.strptime(inbound['eta'],'%Y-%m-%d').date()
             if eta<datetime.now(TZ).date(): raise ValueError('Actualizar ingreso vencido')
+    collections=data.get('full_collections',[])
+    if not isinstance(collections,list): raise ValueError('Colectas inválidas')
+    collection_ids=set(); reserved={sku:0 for sku in skus}
+    for c in collections:
+        if not isinstance(c.get('id'),str) or not c['id'] or c['id'] in collection_ids:
+            raise ValueError('ID de colecta inválido/duplicado')
+        collection_ids.add(c['id'])
+        if c.get('status') not in ('reserved','awaiting_stock','unverified'):
+            raise ValueError('Estado de colecta inválido')
+        if c.get('date'): datetime.strptime(c['date'],'%Y-%m-%d')
+        parts=set()
+        for i in c['items']:
+            if i['sku'] not in skus or i['sku'] in parts or type(i['quantity']) is not int or i['quantity']<=0:
+                raise ValueError('Variante/cantidad de colecta inválida')
+            parts.add(i['sku'])
+            if c['status']=='reserved': reserved[i['sku']]+=i['quantity']
+    for r in rows:
+        n=r.get('warehouse_reserved',0)
+        if type(n) is not int or n<0 or n!=reserved[r['sku']]:
+            raise ValueError('Las reservas deben coincidir con las colectas; warehouse_available es libre de reservas')
     bindings=set()
     for recipe in recipes:
         key=(recipe['item_id'],str(recipe.get('variation_id') or ''))
@@ -38,7 +58,7 @@ def validate(data):
 
 async def plan(client,seller,data):
     validate(data)
-    if data.get('purchase_orders') or any(r.get('estimated') for r in data['stock']):
+    if data.get('purchase_orders') or data.get('full_collections') or any(r.get('estimated') for r in data['stock']):
         return {'complete':False,'recommendations':[], 'reason':'Usar Stock y reposición del monitor: contiene pedidos por estado y conteos estimados que este planificador anterior no concilia.'}
     now=datetime.now(TZ)
     if now-datetime.fromisoformat(data['as_of'])>timedelta(hours=48):
