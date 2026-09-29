@@ -201,31 +201,22 @@ def test_invalid_amounts(bad):
     p=policy();p['costs'][0]['unit_cost']=bad
     with pytest.raises(ValueError):validate_policy(p)
 
-def test_one_use_link_cookie_and_revision(tmp_path):
+def test_policy_revision_persists(tmp_path):
     m=Monitor(tmp_path,None,'237699011','https://nf.example')
-    link=m.issue('link',300);cookie=m.exchange(link)
-    assert cookie and m.exchange(link) is None
-    assert m.authorized(SimpleNamespace(cookies={'nf_monitor':cookie}))
-    assert not m.authorized(SimpleNamespace(cookies={'nf_monitor':link}))
     m.configure(policy(),0)
     with pytest.raises(ValueError):m.configure(policy(),0)
     assert Monitor(tmp_path,None,'237699011','https://nf.example').config()['revision']==1
 
 
-def test_permanent_link_is_stable_and_reusable(tmp_path):
-    secret = 'stable-signing-key'
-    first = Monitor(tmp_path, None, '237699011', 'https://nf.example', secret)
-    link = first.permanent_url()
-    token = link.split('#', 1)[1]
-    first_cookie = first.exchange(token)
-    second_cookie = first.exchange(token)
-    assert first_cookie and second_cookie and first_cookie != second_cookie
-    assert first.authorized(SimpleNamespace(cookies={'nf_monitor': first_cookie}))
-    assert first.authorized(SimpleNamespace(cookies={'nf_monitor': second_cookie}))
-    restarted = Monitor(tmp_path, None, '237699011', 'https://nf.example/', secret)
-    assert restarted.permanent_url() == link
-    assert restarted.exchange(token)
-    assert Monitor(tmp_path, None, '237699011', 'https://nf.example', 'rotated').permanent_url() != link
+def test_legacy_cookie_is_revoked_on_upgrade(tmp_path):
+    import time
+    first = Monitor(tmp_path, None, '237699011', 'https://nf.example', 'stable-signing-key')
+    with first.db() as c:
+        c.execute('INSERT INTO sessions VALUES (?,?,?)', (hashlib.sha256(b'legacy').hexdigest(), 'cookie', time.time()+3600))
+    assert not first.authorized(SimpleNamespace(cookies={'nf_monitor': 'legacy'}))
+    restarted = Monitor(tmp_path, None, '237699011', 'https://nf.example/', 'stable-signing-key')
+    with restarted.db() as c:
+        assert c.execute('SELECT count(*) FROM sessions').fetchone()[0] == 0
 
 def test_stale_cache_on_failure(tmp_path):
     import json,time
@@ -315,13 +306,27 @@ def test_routes_require_private_session(tmp_path, monkeypatch):
         assert runtime['rss_bytes'] > 0 and runtime['asyncio_tasks'] >= 1
         assert c.get('/monitor/data').status_code==401
         assert c.get('/monitor').status_code==200
+        assert c.get('/monitor',follow_redirects=False).status_code==303
+        assert 'Ingresá a tu cuenta' in c.get('/monitor').text
         assert c.get('/monitor/assets/monitor.js').status_code==200
         logo=c.get('/monitor/assets/northfitness-logo.jpg')
         assert logo.status_code==200 and logo.headers['content-type']=='image/jpeg'
         assert hashlib.sha256(logo.content).hexdigest()=='52c0a5f2db09d9d36881ff8ba3f8a9f3f7f461e9eaa78bd1b74b36b027b786d6'
         assert "img-src 'self'" in logo.headers['content-security-policy']
-        assert c.post('/monitor/session',json={'token':'bad'}).status_code==403
+        assert c.post('/monitor/session',json={'token':'bad'}).status_code==401
         assert c.post('/monitor/session',json={'token':'bad'},headers={'Origin':'https://nf.example'}).status_code==401
+        # Exercise the real FastMCP route assembly, not only the isolated route fixture.
+        from urllib.parse import urlsplit, parse_qs
+        auth=Monitor(tmp_path,None,'237699011','https://nf.example').auth
+        link=auth.activation_links()['activation_links'][0]
+        parts=parse_qs(urlsplit(link['url']).fragment)
+        credentials={'username':parts['user'][0],'token':parts['activate'][0],'password':'Private integration password!','remember':True}
+        assert c.post('/monitor/activate',json=credentials,headers={'Origin':'https://nf.example'}).status_code==200
+        assert c.get('/monitor/me').json()['username']==credentials['username']
+        assert c.get('/monitor',follow_redirects=False).status_code==200
+        assert c.post('/monitor/logout',headers={'Origin':'https://nf.example'}).status_code==200
+        assert c.get('/monitor/data').status_code==401
+        assert c.post('/monitor/login',json=credentials,headers={'Origin':'https://nf.example'}).status_code==200
     assert app.state.nf_http_client.is_closed
 
 
@@ -421,7 +426,8 @@ def test_html_controls_have_script_targets():
     parser=IDs();parser.feed(Path('monitor.html').read_text())
     assert len(parser.ids)==len(set(parser.ids))
     assert set(re.findall(r"\$\('([^']+)'\)",Path('monitor.js').read_text()))<=set(parser.ids)
-    assert 'history.replaceState' not in Path('monitor.js').read_text()
+    assert 'history.replaceState' in Path('monitor.js').read_text()
+    assert "fetch('/monitor/session'" not in Path('monitor.js').read_text()
 
 
 def test_product_profit_weighted_totals_and_pending():

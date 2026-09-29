@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="es">
+<head>
+ <meta charset="utf-8">
+ <meta name="viewport" content="width=device-width,initial-scale=1">
+ <meta name="apple-mobile-web-app-title" content="NorthFitness">
+ <title>Ingresar · NorthFitness</title>
+ <link rel="apple-touch-icon" sizes="180x180" href="/monitor/assets/apple-touch-icon.png?v=1">
+ <link rel="icon" type="image/png" href="/monitor/assets/apple-touch-icon.png?v=1">
+ <link rel="stylesheet" href="/monitor/assets/monitor-login.css">
+ <script defer src="/monitor/assets/monitor-login.js"></script>
+</head>
+<body>
+ <main>
+  <img class="brand" src="/monitor/assets/northfitness-logo.jpg" alt="NorthFitness">
+  <p class="eyebrow">MONITOR NORTHFITNESS</p>
+  <h1 id="title">Ingresá a tu cuenta</h1>
+  <p class="intro" id="intro">Acceso privado para los socios.</p>
+  <form id="loginform" method="post" action="/monitor/login">
+   <label for="username">Usuario</label>
+   <input id="username" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" maxlength="100" required>
+   <label for="password" id="passwordlabel">Contraseña</label>
+   <div class="passwordfield"><input id="password" name="password" type="password" autocomplete="current-password" maxlength="128" required><button id="showpassword" type="button" aria-label="Mostrar contraseña" aria-pressed="false">Mostrar</button></div>
+   <div id="confirmgroup" hidden><label for="confirm">Repetí la contraseña</label><input id="confirm" type="password" autocomplete="new-password" maxlength="128"></div>
+   <label class="remember" for="remember"><input id="remember" type="checkbox" checked> Recordarme durante 30 días</label>
+   <p id="message" role="status" aria-live="polite"></p>
+   <button class="submit" id="submit" type="submit">Ingresar</button>
+  </form>
+  <p class="help" id="help">Si olvidaste tu contraseña, pedí restablecer tu usuario desde NorthFitness en ChatGPT.</p>
+  <a id="backlogin" href="/monitor/login" hidden>Ya tengo una contraseña</a>
+  <noscript>Activá JavaScript para ingresar al monitor.</noscript>
+  <footer>BUILT TO PERFORM</footer>
+ </main>
+</body>
+</html>

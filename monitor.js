@@ -8,6 +8,8 @@ const fmt=value=>value===null||value===undefined?'No disponible':currency.format
 const stamp=value=>{try{return new Intl.DateTimeFormat('es-AR',{timeZone:'America/Argentina/Buenos_Aires',dateStyle:'short',timeStyle:'short'}).format(new Date(value));}catch{return value;}};
 $('day').value=new Intl.DateTimeFormat('en-CA',{timeZone:'America/Argentina/Buenos_Aires',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
 let busy=false, allOrders=[], pageIndex=0, lastSuccess=0, timer=null, lastData=null, allowedAge=90000, nextRefresh=30000;
+let signedOut=false;
+function requireLogin(){signedOut=true;clearTimeout(timer);allOrders=[];lastData=null;document.querySelector('main').hidden=true;location.replace('/monitor/login');}
 let savedSettings={};try{savedSettings=JSON.parse(localStorage.getItem('nf-monitor-view')||'{}')||{};}catch{}
 if(['day','week','month'].includes(savedSettings.mode))$('period').value=savedSettings.mode;
 if(!savedSettings.followToday&&/^\d{4}-\d{2}-\d{2}$/.test(savedSettings.day||'')&&savedSettings.day<=$('day').value&&Date.parse($('day').value)-Date.parse(savedSettings.day)<=366*86400000)$('day').value=savedSettings.day;
@@ -52,9 +54,10 @@ function clock(){
  if(lastSuccess && Date.now()-lastSuccess>allowedAge){$('live').textContent='SIN ACTUALIZAR';$('live').className='error';}
 }
 async function update(force=false){
- if(busy)return;clearTimeout(timer);busy=true;const startedAt=Date.now(),selectedDay=$('day').value,selectedPeriod=$('period').value;$('refresh').disabled=true;
+ if(busy||signedOut)return;clearTimeout(timer);busy=true;const startedAt=Date.now(),selectedDay=$('day').value,selectedPeriod=$('period').value;$('refresh').disabled=true;
  try{
   const response=await fetch('/monitor/data?date='+encodeURIComponent(selectedDay)+'&period='+encodeURIComponent(selectedPeriod)+(force?'&refresh=1':''),{cache:'no-store'});
+  if(response.status===401){requireLogin();return;}if(signedOut)return;
   const d=await response.json();if(!response.ok)throw new Error(d.error||'No se pudo actualizar.');
   if(selectedDay!==$('day').value||selectedPeriod!==$('period').value)return;
   lastData=d;nextRefresh=(d.refresh_seconds||30)*1000;allowedAge=nextRefresh+60000;
@@ -82,7 +85,7 @@ async function update(force=false){
   allOrders=d.orders||[];drawOrders();
   drawProducts(d);
  }catch(e){$('state').className='error';$('state').textContent=e.message;$('live').textContent='SIN ACTUALIZAR';$('live').className='error';}
- finally{busy=false;$('refresh').disabled=false;timer=setTimeout(update,(selectedDay!==$('day').value||selectedPeriod!==$('period').value)?0:Math.max(0,nextRefresh-(Date.now()-startedAt)));}
+ finally{busy=false;$('refresh').disabled=false;if(!signedOut)timer=setTimeout(update,(selectedDay!==$('day').value||selectedPeriod!==$('period').value)?0:Math.max(0,nextRefresh-(Date.now()-startedAt)));}
 }
 
 const iso=d=>d.toISOString().slice(0,10);
@@ -165,6 +168,7 @@ $('comparebutton').onclick=async()=>{
  $('comparebutton').disabled=true;$('compareresults').hidden=true;$('comparestate').textContent='Consultando ambos períodos…';
  try{
   const r=await fetch('/monitor/compare?'+new URLSearchParams({date:day,period:mode,reference}),{cache:'no-store'}),d=await r.json();
+  if(r.status===401){requireLogin();return;}if(signedOut)return;
   if(day!==$('day').value||mode!==$('period').value||reference!==$('reference').value)return;
   if(!r.ok)throw new Error(d.error||'No se pudo comparar.');
   const a=d.current,b=d.reference;
@@ -177,10 +181,17 @@ $('comparebutton').onclick=async()=>{
  finally{if(id===comparisonRequest)$('comparebutton').disabled=!$('reference').options.length;}
 };
 async function init(){
- const token=location.hash.slice(1);
- if(token){try{const r=await fetch('/monitor/session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token})});const d=await r.json();if(!r.ok)throw new Error(d.error);}catch(e){$('state').className='error';$('state').textContent=e.message;return;}}
+ history.replaceState(null,'','/monitor');
+ try{const r=await fetch('/monitor/me',{cache:'no-store'});if(r.status===401){requireLogin();return;}if(!r.ok)throw new Error('No se pudo verificar la sesión.');const d=await r.json();$('accountname').textContent=d.username;}
+ catch(e){$('state').className='error';$('state').textContent=e.message;return;}
  clock();setInterval(clock,1000);await update();
 }
+$('logout').onclick=async()=>{
+ $('logout').disabled=true;
+ try{const r=await fetch('/monitor/logout',{method:'POST'});if(!r.ok)throw new Error('No se pudo cerrar la sesión. Reintentá.');requireLogin();}
+ catch(e){$('state').className='error';$('state').textContent=e.message;$('logout').disabled=false;}
+};
+window.addEventListener('pageshow',event=>{if(event.persisted)location.reload();});
 $('period').addEventListener('change',()=>{pageIndex=0;navigation();update();});$('search').addEventListener('input',()=>{pageIndex=0;drawOrders();});$('prev').addEventListener('click',()=>{pageIndex--;drawOrders();});$('next').addEventListener('click',()=>{pageIndex++;drawOrders();});
 $('productsort').addEventListener('change',()=>{saveSettings();if(lastData)drawProducts(lastData);});
 $('refresh').addEventListener('click',()=>update(true));$('day').addEventListener('change',()=>{navigation();update();});
